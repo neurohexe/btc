@@ -1,0 +1,178 @@
+/**
+ * Google Форма заявок: создание с разделами и переходами,
+ * обновление списков позиций со склада, обработка ответов.
+ */
+
+function buildForm() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = ss_();
+  const T = FORM_TITLES;
+  const officeName = getSetting_('Название офиса') || ss.getName();
+
+  // Старую форму закрываем для ответов
+  const oldId = getSetting_('ID формы');
+  if (oldId) {
+    try { FormApp.openById(oldId).setAcceptingResponses(false); } catch (e) { /* формы уже нет */ }
+  }
+
+  const form = FormApp.create('Заявка на выдачу / сдачу — ' + officeName);
+  form.setDescription('Выдача мебели и аксессуаров для рабочего места. Каждая позиция выдаётся не больше 1 шт. на сотрудника.')
+    .setConfirmationMessage('Заявка отправлена. Ответственный получил уведомление.')
+    .setCollectEmail(false)
+    .setProgressBar(true)
+    .setDestination(FormApp.DestinationType.SPREADSHEET, ss.getId());
+
+  // Раздел 1. Кто вы
+  form.addTextItem().setTitle(T.LOGIN).setRequired(true)
+    .setHelpText('Рабочий логин латиницей, без @')
+    .setValidation(FormApp.createTextValidation()
+      .setHelpText('Только латинские буквы, цифры, точка и дефис')
+      .requireTextMatchesPattern('^[A-Za-z0-9.\\-]+$').build());
+  const qCategory = form.addMultipleChoiceItem().setTitle(T.CATEGORY).setRequired(true);
+
+  // Раздел 2. Где вы и что нужно
+  const pWhere = form.addPageBreakItem().setTitle('Где вы сидите');
+  const floorItem = form.addListItem().setTitle(T.FLOOR).setRequired(true)
+    .setChoiceValues(floorChoices_());
+  form.addTextItem().setTitle(T.DESK).setRequired(true)
+    .setValidation(FormApp.createTextValidation()
+      .setHelpText('Например: 12 или 12А')
+      .requireTextMatchesPattern('^[0-9A-Za-zА-Яа-яЁё.\\-/]{1,10}$').build());
+  const qAction = form.addMultipleChoiceItem().setTitle(T.ACTION).setRequired(true);
+
+  // Раздел 3. Формат работы
+  const pFormat = form.addPageBreakItem().setTitle('Формат работы');
+  const qFormat = form.addMultipleChoiceItem().setTitle(T.FORMAT).setRequired(true);
+
+  // Раздел 4. Заказ — офисный
+  const pOffice = form.addPageBreakItem().setTitle('Заказ — офисный формат')
+    .setHelpText('Отметьте нужное. Каждая позиция — 1 шт.');
+  const itOffice = form.addCheckboxItem().setTitle(T.ITEMS_OFFICE).setRequired(true);
+
+  // Раздел 5. Заказ — гибридный
+  const pHybrid = form.addPageBreakItem().setTitle('Заказ — гибридный формат')
+    .setHelpText('Для гибридного формата доступны не все позиции. Каждая позиция — 1 шт.');
+  const itHybrid = form.addCheckboxItem().setTitle(T.ITEMS_HYBRID).setRequired(true);
+
+  // Раздел 6. Удалённый — выдачи нет
+  const pRemote = form.addPageBreakItem().setTitle('Выдача недоступна')
+    .setHelpText('Для удалённого формата выдача не предусмотрена. Если нужно сдать вещи — вернитесь назад и выберите «Сдать». Эту заявку отправлять не нужно.');
+
+  // Раздел 7. Сдача
+  const pReturn = form.addPageBreakItem().setTitle('Сдача');
+  const itReturn = form.addCheckboxItem().setTitle(T.ITEMS_RETURN).setRequired(true);
+  form.addMultipleChoiceItem().setTitle(T.REASON).setRequired(true).setChoiceValues(RETURN_REASONS);
+  form.addMultipleChoiceItem().setTitle(T.NEW_FORMAT).setRequired(false)
+    .setHelpText('Заполните, если причина — смена формата работы')
+    .setChoiceValues([FORMAT.OFFICE, FORMAT.HYBRID, FORMAT.REMOTE]);
+
+  // Раздел 8. Недоступно для консультантов и КПБ
+  const pBlocked = form.addPageBreakItem().setTitle('Заявки через форму недоступны')
+    .setHelpText('Для консультантов и сотрудников КПБ выдача через форму не предусмотрена. По вопросам обратитесь к ответственному в офисе. Эту заявку отправлять не нужно.');
+
+  // Переходы. setGoToPage на разрыве = куда идти после раздела ПЕРЕД ним.
+  pHybrid.setGoToPage(FormApp.PageNavigationType.SUBMIT);  // после «офисный» — отправка
+  pRemote.setGoToPage(FormApp.PageNavigationType.SUBMIT);  // после «гибридный» — отправка
+  pReturn.setGoToPage(FormApp.PageNavigationType.SUBMIT);  // после «удалённый» — отправка
+  pBlocked.setGoToPage(FormApp.PageNavigationType.SUBMIT); // после «сдача» — отправка
+
+  qCategory.setChoices([
+    qCategory.createChoice(EMP_CATEGORY.STAFF, pWhere),
+    qCategory.createChoice(EMP_CATEGORY.CONSULTANT, pBlocked),
+    qCategory.createChoice(EMP_CATEGORY.KPB, pBlocked)
+  ]);
+  qAction.setChoices([
+    qAction.createChoice(ACTION.ORDER, pFormat),
+    qAction.createChoice(ACTION.RETURN, pReturn)
+  ]);
+  qFormat.setChoices([
+    qFormat.createChoice(FORMAT.OFFICE, pOffice),
+    qFormat.createChoice(FORMAT.HYBRID, pHybrid),
+    qFormat.createChoice(FORMAT.REMOTE, pRemote)
+  ]);
+
+  PropertiesService.getScriptProperties().setProperty('FORM_ITEMS', JSON.stringify({
+    office: itOffice.getId(), hybrid: itHybrid.getId(), ret: itReturn.getId(), floor: floorItem.getId()
+  }));
+  setSetting_('ID формы', form.getId());
+  setSetting_('Ссылка на форму', form.getPublishedUrl());
+
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'onFormSubmitHandler')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger('onFormSubmitHandler').forForm(form).onFormSubmit().create();
+
+  recalcStock_();
+  syncFormCatalog_();
+
+  ui.alert('Форма создана',
+    'Ссылка для сотрудников:\n' + form.getPublishedUrl() + '\n\nСсылка сохранена на листе «Офис».',
+    ui.ButtonSet.OK);
+}
+
+function floorChoices_() {
+  const n = getFloorsCount_();
+  return Array.from({ length: n }, (_, i) => String(i + 1));
+}
+
+/** Обновляет в форме списки позиций и этажей по данным склада. */
+function syncFormCatalog_() {
+  const formId = getSetting_('ID формы');
+  const ids = JSON.parse(PropertiesService.getScriptProperties().getProperty('FORM_ITEMS') || 'null');
+  if (!formId || !ids) return;
+  let form;
+  try { form = FormApp.openById(formId); } catch (e) { return; }
+
+  const catalog = getCatalog_().filter(i => i.forEmployees);
+  const label = i => i.name + AVAIL_SEP + (i.available > 0 ? 'в наличии' : 'нет в наличии');
+  const orEmpty = arr => arr.length ? arr : [EMPTY_CHOICE];
+
+  const office = catalog.filter(i => i.audience === AUDIENCE.OFFICE || i.audience === AUDIENCE.BOTH).map(label);
+  const hybrid = catalog.filter(i => i.audience === AUDIENCE.BOTH).map(label);
+  const ret = catalog.map(i => i.name);
+
+  form.getItemById(ids.office).asCheckboxItem().setChoiceValues(orEmpty(office));
+  form.getItemById(ids.hybrid).asCheckboxItem().setChoiceValues(orEmpty(hybrid));
+  form.getItemById(ids.ret).asCheckboxItem().setChoiceValues(orEmpty(ret));
+  form.getItemById(ids.floor).asListItem().setChoiceValues(floorChoices_());
+}
+
+function stripAvail_(s) {
+  const str = String(s || '');
+  const i = str.lastIndexOf(AVAIL_SEP);
+  return (i > 0 ? str.slice(0, i) : str).trim();
+}
+
+/** Триггер «при отправке формы». */
+function onFormSubmitHandler(e) {
+  const T = FORM_TITLES;
+  const a = {};
+  e.response.getItemResponses().forEach(r => { a[r.getItem().getTitle()] = r.getResponse(); });
+
+  if (a[T.CATEGORY] !== EMP_CATEGORY.STAFF) return;          // консультанты и КПБ
+  const action = a[T.ACTION];
+  const format = a[T.FORMAT] || '';
+  let items = [];
+  if (action === ACTION.ORDER) {
+    if (format === FORMAT.OFFICE) items = a[T.ITEMS_OFFICE] || [];
+    else if (format === FORMAT.HYBRID) items = a[T.ITEMS_HYBRID] || [];
+    else return;                                              // удалённый — выдачи нет
+  } else if (action === ACTION.RETURN) {
+    items = a[T.ITEMS_RETURN] || [];
+  } else return;
+
+  items = items.map(stripAvail_).filter(n => n && n !== EMPTY_CHOICE);
+  if (!items.length) return;
+
+  createRequest_({
+    date: e.response.getTimestamp() || new Date(),
+    login: String(a[T.LOGIN] || '').trim().toLowerCase(),
+    floor: a[T.FLOOR] || '',
+    desk: String(a[T.DESK] || '').trim(),
+    action,
+    format: action === ACTION.ORDER ? format : '',
+    items,
+    reason: action === ACTION.RETURN ? (a[T.REASON] || '') : '',
+    newFormat: action === ACTION.RETURN ? (a[T.NEW_FORMAT] || '') : ''
+  });
+}
