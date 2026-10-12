@@ -1,0 +1,368 @@
+/**
+ * Меню, первичная настройка, дашборд, триггеры, секреты (токены).
+ */
+
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('📦 Учёт ТМЦ')
+    .addItem('1. Первичная настройка', 'setupSystem')
+    .addItem('2. Создать / пересоздать форму заявок', 'buildForm')
+    .addSeparator()
+    .addItem('Операция со складом…', 'showOperationDialog')
+    .addItem('Добавить категорию…', 'promptAddCategory')
+    .addItem('Загрузить данные из файла…', 'showImportDialog')
+    .addItem('Пересчитать остатки и обновить форму', 'refreshAll')
+    .addItem('Оформить листы заново', 'restyleSheets')
+    .addSeparator()
+    .addSubMenu(ui.createMenu('Настройки')
+      .addItem('Токен Telegram-бота', 'promptTelegramToken')
+      .addItem('Подключить бота (webhook)', 'connectTelegram')
+      .addItem('Настройки ИИ', 'promptAiSettings'))
+    .addToUi();
+}
+
+function setupSystem() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  PropertiesService.getScriptProperties().setProperty('SS_ID', ss.getId());
+
+  Object.keys(SHEETS).forEach(key => {
+    if (key === 'DASHBOARD') return;
+    const sh = getOrCreateSheet_(SHEETS[key]);
+    const h = HEADERS[key];
+    sh.getRange(1, 1, 1, h.length).setValues([h]);
+  });
+
+  // Параметры офиса
+  const office = sheet_('OFFICE');
+  const existing = office.getRange(1, 1, Math.max(office.getLastRow(), 1), 1).getValues().map(r => r[0]);
+  OFFICE_FIELDS.forEach(([k, v]) => {
+    if (existing.indexOf(k) < 0) office.appendRow([k, v]);
+  });
+
+  // Категории по умолчанию
+  if (getCategories_().length === 0) {
+    sheet_('CATEGORIES').getRange(2, 1, 4, 1)
+      .setValues([['Мебель'], ['Аксессуары для рабочего места'], ['Растения'], ['Техника']]);
+  }
+
+  applyValidations_();
+  applyFormatting_();
+  buildDashboard_();
+  installEditTrigger_();
+
+  const def = ss.getSheetByName('Лист1') || ss.getSheetByName('Sheet1');
+  if (def && def.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(def);
+
+  ss.setActiveSheet(sheet_('OFFICE'));
+  SpreadsheetApp.getUi().alert(
+    'Готово',
+    'Листы созданы. Дальше:\n' +
+    '1) заполните «Офис» (особенно количество этажей) и «Ответственные»;\n' +
+    '2) заведите позиции: вручную на листе «Склад» или через «Загрузить данные из файла»;\n' +
+    '3) создайте форму: меню → «2. Создать форму заявок»;\n' +
+    '4) подключите Telegram: меню → Настройки.',
+    SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+function applyValidations_() {
+  const yesNo = SpreadsheetApp.newDataValidation().requireValueInList(['да', 'нет'], true).build();
+  const N = 999;
+
+  const cat = sheet_('CATALOG');
+  const catRange = sheet_('CATEGORIES').getRange('A2:A');
+  cat.getRange(2, ci_('CATALOG', 'Категория') + 1, N, 1).setDataValidation(
+    SpreadsheetApp.newDataValidation().requireValueInRange(catRange, true).setAllowInvalid(false).build());
+  cat.getRange(2, ci_('CATALOG', 'Выдаётся сотрудникам') + 1, N, 1).setDataValidation(yesNo);
+  cat.getRange(2, ci_('CATALOG', 'Кому выдаётся') + 1, N, 1).setDataValidation(
+    SpreadsheetApp.newDataValidation().requireValueInList([AUDIENCE.OFFICE, AUDIENCE.BOTH], true).build());
+
+  sheet_('RESP').getRange(2, ci_('RESP', 'Получает уведомления') + 1, N, 1).setDataValidation(yesNo);
+
+  const req = sheet_('REQUESTS');
+  req.getRange(2, ci_('REQUESTS', 'Действие ▼') + 1, N, 1).setDataValidation(
+    SpreadsheetApp.newDataValidation().requireValueInList(Object.keys(SHEET_ACTIONS), true).build());
+  req.getRange(2, ci_('REQUESTS', '№') + 1, N, 1).setNumberFormat('@');
+  req.getRange(2, ci_('REQUESTS', 'Стол') + 1, N, 1).setNumberFormat('@');
+  sheet_('ISSUED').getRange(2, ci_('ISSUED', 'Стол') + 1, N, 1).setNumberFormat('@');
+
+  const office = sheet_('OFFICE');
+  const row = findOfficeRow_('Куда слать уведомления');
+  if (row) office.getRange(row, 2).setDataValidation(
+    SpreadsheetApp.newDataValidation().requireValueInList(NOTIFY_MODES, true).build());
+}
+
+// ---------- Оформление ----------
+
+const STYLE = {
+  font: 'Roboto',
+  head: '#2f4858',      // шапка листа
+  headCalc: '#5f7a8a',  // шапка расчётных колонок
+  headText: '#ffffff',
+  band1: '#ffffff',
+  band2: '#f4f7f9',
+  muted: '#6b7a87',
+  tile: '#eef3f6',
+  tabs: { OFFICE: '#8d99a6', RESP: '#8d99a6', CATEGORIES: '#8d99a6', CATALOG: '#2f6f8f',
+          REQUESTS: '#c27c0e', ISSUED: '#3d8b5a', FURNITURE: '#3d8b5a', JOURNAL: '#8d99a6', DASHBOARD: '#2f4858' }
+};
+
+/** Ширины колонок по листам (в пикселях). */
+const WIDTHS = {
+  OFFICE: [240, 380],
+  RESP: [200, 140, 120, 170, 130, 150],
+  CATEGORIES: [240, 360],
+  CATALOG: [70, 240, 180, 110, 160, 90, 90, 80, 90, 80, 110, 90, 80, 90, 110],
+  REQUESTS: [90, 130, 120, 60, 70, 90, 100, 220, 140, 110, 280, 120, 150, 130, 130, 160, 140, 40],
+  ISSUED: [120, 60, 70, 100, 220, 110, 100, 90, 110],
+  FURNITURE: [60, 220, 240, 100, 260],
+  JOURNAL: [130, 150, 80, 220, 70, 110, 110, 110, 60, 60, 90, 160, 240]
+};
+
+/** Колонки с датами и форматы. */
+const DATE_COLS = {
+  REQUESTS: { 'Дата': 'dd.mm.yyyy hh:mm', 'Взята в работу': 'dd.mm.yyyy hh:mm', 'Закрыта': 'dd.mm.yyyy hh:mm' },
+  ISSUED: { 'Дата выдачи': 'dd.mm.yyyy', 'Дата сдачи': 'dd.mm.yyyy' },
+  JOURNAL: { 'Дата': 'dd.mm.yyyy hh:mm' }
+};
+
+/** Колонки, которые выравниваются по центру. */
+const CENTER_COLS = {
+  CATALOG: ['ID', 'Выдаётся сотрудникам', 'Мин. остаток', 'Поступило', 'Выдано', 'Возвращено', 'Списано',
+            'Установлено в офис', 'На складе', 'В работе', 'Доступно', 'Статус'],
+  REQUESTS: ['№', 'Этаж', 'Стол', 'Статус'],
+  ISSUED: ['Этаж', 'Стол', 'Статус'],
+  FURNITURE: ['Этаж', 'Количество'],
+  JOURNAL: ['ID позиции', 'Кол-во', 'Этаж', 'Стол'],
+  RESP: ['Получает уведомления']
+};
+
+function restyleSheets() {
+  applyFormatting_();
+  buildDashboard_();
+  SpreadsheetApp.getActiveSpreadsheet().toast('Оформление обновлено');
+}
+
+function styleSheet_(key) {
+  const sh = sheet_(key);
+  const n = HEADERS[key].length;
+  const rows = 1000;
+  if (sh.getMaxRows() < rows) sh.insertRowsAfter(sh.getMaxRows(), rows - sh.getMaxRows());
+
+  sh.setHiddenGridlines(true);
+  sh.setTabColor(STYLE.tabs[key] || null);
+  sh.getRange(1, 1, rows, n).setFontFamily(STYLE.font).setFontSize(10).setVerticalAlignment('middle');
+
+  // Чередование строк
+  sh.getBandings().forEach(b => b.remove());
+  sh.getRange(1, 1, rows, n).applyRowBanding()
+    .setHeaderRowColor(STYLE.head).setFirstRowColor(STYLE.band1).setSecondRowColor(STYLE.band2);
+
+  // Шапка
+  sh.getRange(1, 1, 1, n).setFontColor(STYLE.headText).setFontWeight('bold')
+    .setWrap(true).setVerticalAlignment('middle');
+  sh.setRowHeight(1, 38);
+  sh.setFrozenRows(1);
+
+  (WIDTHS[key] || []).forEach((w, i) => { if (i < n) sh.setColumnWidth(i + 1, w); });
+  Object.entries(DATE_COLS[key] || {}).forEach(([name, fmt]) =>
+    sh.getRange(2, ci_(key, name) + 1, rows - 1, 1).setNumberFormat(fmt));
+  (CENTER_COLS[key] || []).forEach(name =>
+    sh.getRange(1, ci_(key, name) + 1, rows, 1).setHorizontalAlignment('center'));
+
+  // Лишние пустые колонки справа убираем
+  if (sh.getMaxColumns() > n) sh.deleteColumns(n + 1, sh.getMaxColumns() - n);
+  return sh;
+}
+
+function applyFormatting_() {
+  ['OFFICE', 'RESP', 'CATEGORIES', 'CATALOG', 'REQUESTS', 'ISSUED', 'FURNITURE', 'JOURNAL'].forEach(styleSheet_);
+
+  // Офис: первая колонка как подписи
+  const office = sheet_('OFFICE');
+  office.getRange(2, 1, office.getMaxRows() - 1, 1).setFontColor(STYLE.muted);
+
+  // Склад: расчётные колонки выделены другой шапкой
+  const cat = sheet_('CATALOG');
+  const first = ci_('CATALOG', 'Поступило') + 1;
+  const calcCount = HEADERS.CATALOG.length - first + 1;
+  cat.getRange(1, first, 1, calcCount).setBackground(STYLE.headCalc);
+  cat.getRange(2, ci_('CATALOG', 'Позиция') + 1, 999, 1).setFontWeight('bold');
+  cat.setFrozenColumns(2);
+  const st = cat.getRange(2, ci_('CATALOG', 'Статус') + 1, 999, 1);
+  cat.setConditionalFormatRules([
+    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('Докупить')
+      .setBackground('#fbe1df').setFontColor('#a1322a').setBold(true).setRanges([st]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('Нет в наличии')
+      .setBackground('#fff1cc').setFontColor('#8a5a00').setRanges([st]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('ОК')
+      .setFontColor('#3d8b5a').setRanges([st]).build()
+  ]);
+
+  // Заявки: цвет статуса, перенос текста, скрытая служебная колонка
+  const req = sheet_('REQUESTS');
+  const stRange = req.getRange(2, ci_('REQUESTS', 'Статус') + 1, 999, 1);
+  const colors = [
+    [STATUS.NEW, '#fff1cc', '#8a5a00'], [STATUS.WORK, '#dbe9f6', '#245b7a'],
+    [STATUS.ISSUED, '#dcf0e2', '#2f6b3f'], [STATUS.RETURNED, '#dcf0e2', '#2f6b3f'],
+    [STATUS.REJECTED, '#ececec', '#6b7a87']
+  ];
+  req.setConditionalFormatRules(colors.map(([t, bg, fg]) =>
+    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(t).setBackground(bg).setFontColor(fg)
+      .setBold(true).setRanges([stRange]).build()));
+  ['Позиции', 'Проверки', 'Причина отклонения'].forEach(n =>
+    req.getRange(2, ci_('REQUESTS', n) + 1, 999, 1).setWrap(true).setVerticalAlignment('top'));
+  req.getRange(1, ci_('REQUESTS', 'Действие ▼') + 1).setBackground('#c27c0e');
+  req.setFrozenColumns(1);
+  req.hideColumns(ci_('REQUESTS', 'TG') + 1);
+
+  // Выдано: сданное приглушаем
+  const iss = sheet_('ISSUED');
+  const issSt = iss.getRange(2, ci_('ISSUED', 'Статус') + 1, 999, 1);
+  iss.setConditionalFormatRules([
+    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(ISSUED_STATUS.RETURNED)
+      .setFontColor('#9aa5b0').setRanges([iss.getRange(2, 1, 999, HEADERS.ISSUED.length)]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(ISSUED_STATUS.ACTIVE)
+      .setFontColor('#2f6b3f').setBold(true).setRanges([issSt]).build()
+  ]);
+
+  // Журнал: мелкий серый текст, это служебный лист
+  sheet_('JOURNAL').getRange(2, 1, 999, HEADERS.JOURNAL.length).setFontColor('#44525e');
+
+  protectWarning_(sheet_('JOURNAL'), 'Журнал заполняется системой. Правки вручную ломают остатки.');
+  protectWarning_(cat.getRange(1, first, 1000, calcCount), 'Эти колонки считает система.');
+}
+
+function protectWarning_(target, description) {
+  const isRange = typeof target.getA1Notation === 'function';
+  const sh = isRange ? target.getSheet() : target;
+  const type = isRange ? SpreadsheetApp.ProtectionType.RANGE : SpreadsheetApp.ProtectionType.SHEET;
+  if (sh.getProtections(type).some(p => p.getDescription() === description)) return;
+  target.protect().setDescription(description).setWarningOnly(true);
+}
+
+function buildDashboard_() {
+  const sh = getOrCreateSheet_(SHEETS.DASHBOARD);
+  sh.clear();
+  sh.clearConditionalFormatRules();
+  sh.getBandings().forEach(b => b.remove());
+  sh.setHiddenGridlines(true).setTabColor(STYLE.tabs.DASHBOARD);
+  sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).setFontFamily(STYLE.font).setFontSize(10);
+
+  const R = `'${SHEETS.REQUESTS}'!`;
+  const C = `'${SHEETS.CATALOG}'!`;
+  const st = colLetter_('REQUESTS', 'Статус');
+  const catStatus = colLetter_('CATALOG', 'Статус');
+  const sumCol = name => { const l = colLetter_('CATALOG', name); return `=SUM(${C}${l}2:${l})`; };
+
+  // Заголовок
+  sh.getRange('A1').setValue('Учёт ТМЦ').setFontSize(20).setFontWeight('bold').setFontColor(STYLE.head);
+  sh.getRange('A2').setFormula(`=IFERROR(VLOOKUP("Название офиса",'${SHEETS.OFFICE}'!A:B,2,0),"")`)
+    .setFontSize(11).setFontColor(STYLE.muted);
+  sh.setRowHeight(1, 40);
+
+  // Плитки показателей: подпись над крупным числом
+  const tiles = [
+    [['Новые заявки', `=COUNTIF(${R}${st}2:${st},"${STATUS.NEW}")`],
+     ['В работе', `=COUNTIF(${R}${st}2:${st},"${STATUS.WORK}")`],
+     ['Ожидает выдачи, шт.', sumCol('В работе')],
+     ['К докупке, позиций', `=COUNTIF(${C}${catStatus}2:${catStatus},"Докупить")`]],
+    [['На складе, шт.', sumCol('На складе')],
+     ['Всего поступило', sumCol('Поступило')],
+     ['Всего выдано', sumCol('Выдано')],
+     ['Возвращено', sumCol('Возвращено')]]
+  ];
+  tiles.forEach((row, ri) => {
+    const labelRow = 4 + ri * 3, valueRow = labelRow + 1;
+    row.forEach(([label, f], ci) => {
+      const col = 1 + ci;
+      sh.getRange(labelRow, col).setValue(label).setFontColor(STYLE.muted).setBackground(STYLE.tile)
+        .setVerticalAlignment('bottom');
+      sh.getRange(valueRow, col).setFormula(f).setFontSize(22).setFontWeight('bold').setFontColor(STYLE.head)
+        .setBackground(STYLE.tile).setHorizontalAlignment('left').setVerticalAlignment('top');
+    });
+    sh.setRowHeight(labelRow, 26).setRowHeight(valueRow, 40).setRowHeight(valueRow + 1, 10);
+  });
+  // Красим плитку «К докупке», если там не ноль
+  const buy = sh.getRange(5, 4);
+  sh.setConditionalFormatRules([
+    SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThan(0).setFontColor('#a1322a')
+      .setRanges([buy]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThan(0).setFontColor('#8a5a00')
+      .setRanges([sh.getRange(5, 1)]).build()
+  ]);
+
+  // Открытые заявки
+  sh.getRange('A11').setValue('Открытые заявки').setFontSize(13).setFontWeight('bold').setFontColor(STYLE.head);
+  const cols = ['№', 'Дата', 'Логин', 'Этаж', 'Стол', 'Действие', 'Позиции', 'Статус', 'Ответственный', 'Проверки']
+    .map(n => colLetter_('REQUESTS', n)).join(',');
+  const last = columnToLetter_(HEADERS.REQUESTS.length);
+  const dateCol = colLetter_('REQUESTS', 'Дата');
+  sh.getRange('A12').setFormula(
+    `=IFERROR(QUERY(${R}A1:${last},"select ${cols} where ${st}='${STATUS.NEW}' or ${st}='${STATUS.WORK}' order by ${dateCol} desc",1),"Открытых заявок нет")`);
+  sh.getRange('A12:J12').setFontWeight('bold').setFontColor(STYLE.headText).setBackground(STYLE.head);
+  sh.getRange('B13:B200').setNumberFormat('dd.mm.yyyy hh:mm');
+  sh.getRange('G13:G200').setWrap(true);
+  sh.getRange('J13:J200').setWrap(true).setFontColor('#8a5a00');
+
+  // К докупке — справа
+  sh.getRange('L11').setValue('К докупке').setFontSize(13).setFontWeight('bold').setFontColor(STYLE.head);
+  const cc = ['Позиция', 'Категория', 'На складе', 'В работе', 'Доступно', 'Мин. остаток']
+    .map(n => colLetter_('CATALOG', n)).join(',');
+  const lastC = columnToLetter_(HEADERS.CATALOG.length);
+  sh.getRange('L12').setFormula(
+    `=IFERROR(QUERY(${C}A1:${lastC},"select ${cc} where ${catStatus}='Докупить'",1),"Докупать ничего не нужно")`);
+  sh.getRange('L12:Q12').setFontWeight('bold').setFontColor(STYLE.headText).setBackground('#a1322a');
+
+  [170, 150, 150, 160, 70, 90, 240, 110, 150, 260, 24, 200, 150, 90, 80, 80, 100]
+    .forEach((w, i) => sh.setColumnWidth(i + 1, w));
+
+  sh.getParent().setActiveSheet(sh);
+  sh.getParent().moveActiveSheet(1);
+}
+
+function installEditTrigger_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'handleSheetEdit')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger('handleSheetEdit').forSpreadsheet(ss).onEdit().create();
+}
+
+function refreshAll() {
+  recalcStock_();
+  syncFormCatalog_();
+  SpreadsheetApp.getActiveSpreadsheet().toast('Остатки пересчитаны, списки в форме обновлены');
+}
+
+// ---------- Секреты ----------
+
+function promptTelegramToken() {
+  const ui = SpreadsheetApp.getUi();
+  const r = ui.prompt('Токен Telegram-бота', 'Вставьте токен от @BotFather. Он хранится в настройках скрипта, не в таблице.', ui.ButtonSet.OK_CANCEL);
+  if (r.getSelectedButton() !== ui.Button.OK) return;
+  PropertiesService.getScriptProperties().setProperty('TG_TOKEN', r.getResponseText().trim());
+  ui.alert('Токен сохранён. Теперь разверните веб-приложение и выберите «Подключить бота».');
+}
+
+function promptAiSettings() {
+  const ui = SpreadsheetApp.getUi();
+  const p = PropertiesService.getScriptProperties();
+  const ask = (title, text, key) => {
+    const r = ui.prompt(title, text + (p.getProperty(key) ? '\n(сейчас задано; оставьте пустым, чтобы не менять)' : ''), ui.ButtonSet.OK_CANCEL);
+    if (r.getSelectedButton() !== ui.Button.OK) throw new Error('cancel');
+    const v = r.getResponseText().trim();
+    if (v) p.setProperty(key, v);
+  };
+  try {
+    ask('ИИ: провайдер', 'Введите gemini, anthropic или yandex. Пусто — gemini.', 'AI_PROVIDER');
+    if (!p.getProperty('AI_PROVIDER')) p.setProperty('AI_PROVIDER', 'gemini');
+    ask('ИИ: ключ API', 'Для Gemini — ключ из Google AI Studio (aistudio.google.com → Get API key).', 'AI_API_KEY');
+    ask('ИИ: модель', 'Пусто — по умолчанию (для Gemini: gemini-flash-latest).', 'AI_MODEL');
+    if ((p.getProperty('AI_PROVIDER') || '').toLowerCase() === 'yandex') {
+      ask('ИИ: folder_id', 'ID каталога Yandex Cloud', 'YANDEX_FOLDER_ID');
+    }
+    ui.alert('Настройки ИИ сохранены. Провайдер: ' + p.getProperty('AI_PROVIDER'));
+  } catch (e) {
+    if (e.message !== 'cancel') throw e;
+  }
+}
