@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
+<style>
+  :root { --ink:#1d2733; --muted:#5b6876; --line:#d5dbe2; --accent:#245b7a; --warn:#9a5b00; --bad:#a1322a; --soft:#f3f6f9; }
+  * { box-sizing:border-box; }
+  body { font:14px/1.45 Roboto, Arial, sans-serif; color:var(--ink); margin:0; padding:4px 2px; }
+  .row { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-end; margin-bottom:12px; }
+  label.f { display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--muted); }
+  select, input[type=file], textarea { font:inherit; color:var(--ink); }
+  select { padding:6px 8px; border:1px solid var(--line); border-radius:4px; min-width:220px; }
+  textarea { width:100%; height:90px; border:1px solid var(--line); border-radius:4px; padding:8px; font-size:12px; }
+  .modes { display:flex; gap:14px; }
+  .modes label { color:var(--ink); font-size:14px; }
+  .hint { color:var(--muted); font-size:13px; margin:-4px 0 12px; }
+  button { font:inherit; padding:8px 16px; border-radius:4px; border:1px solid var(--accent); background:var(--accent); color:#fff; cursor:pointer; }
+  button.ghost { background:#fff; color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  button:focus-visible, select:focus-visible, textarea:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  #status { min-height:20px; margin:8px 0; font-size:13px; }
+  #status.err { color:var(--bad); }
+  .wrap { max-height:330px; overflow:auto; border:1px solid var(--line); border-radius:4px; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th { position:sticky; top:0; background:var(--soft); text-align:left; font-weight:600; }
+  th, td { border-bottom:1px solid var(--line); padding:5px 8px; vertical-align:top; }
+  td[contenteditable] { min-width:70px; }
+  td[contenteditable]:focus { outline:2px solid var(--accent); background:#fff; }
+  tr.bad td { background:#fbeceb; }
+  tr.warn td.flags { color:var(--warn); }
+  tr.bad td.flags { color:var(--bad); }
+  .foot { display:flex; justify-content:space-between; align-items:center; margin-top:12px; }
+  .hidden { display:none; }
+  h3.sec { font-size:14px; margin:14px 0 6px; }
+  h3.sec:first-child { margin-top:0; }
+</style>
+</head>
+<body>
+  <div class="row">
+    <label class="f">Что загружаем
+      <select id="target"></select>
+    </label>
+    <div class="f">
+      <span style="font-size:13px;color:var(--muted)">Как разбирать</span>
+      <div class="modes">
+        <label><input type="radio" name="mode" value="direct" id="modeDirect" checked> По заголовкам колонок</label>
+        <label><input type="radio" name="mode" value="ai" id="modeAi"> Через ИИ</label>
+      </div>
+    </div>
+  </div>
+  <div class="hint" id="hint"></div>
+
+  <div class="row">
+    <label class="f">Файл: Excel, CSV, PDF или фото
+      <input type="file" id="file" accept=".xlsx,.xls,.csv,.pdf,.png,.jpg,.jpeg,.webp">
+    </label>
+    <label class="f hidden" id="sheetWrap">Лист в файле
+      <select id="sheet"></select>
+    </label>
+    <button class="ghost" id="pasteToggle" type="button">Вставить из таблицы</button>
+  </div>
+  <div id="pasteWrap" class="hidden" style="margin-bottom:12px">
+    <textarea id="paste" placeholder="Скопируйте строки вместе с заголовками и вставьте сюда"></textarea>
+  </div>
+
+  <div class="row" style="align-items:center">
+    <button id="previewBtn" type="button">Загрузить</button>
+    <label class="check" style="display:flex;gap:6px;align-items:center;font-size:14px">
+      <input type="checkbox" id="direct" checked> Записать сразу, без проверки
+    </label>
+  </div>
+  <div id="status"></div>
+
+  <div id="previewBlock" class="hidden">
+    <div class="wrap" id="tables"></div>
+    <div class="foot">
+      <span id="counts" style="color:var(--muted);font-size:13px"></span>
+      <button id="commitBtn" type="button">Записать отмеченные</button>
+    </div>
+  </div>
+
+<script>
+  let meta = null, wb = null, bin = null, pdfRows = null, preview = null;
+  const AI_TYPES = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp'];
+  const $ = id => document.getElementById(id);
+
+  function setStatus(text, isErr) { $('status').textContent = text || ''; $('status').className = isErr ? 'err' : ''; }
+
+  google.script.run.withSuccessHandler(m => {
+    meta = m;
+    const auto = document.createElement('option'); auto.value = 'auto'; auto.textContent = 'Всё сразу — ИИ сам разложит'; $('target').appendChild(auto);
+    Object.keys(m.targets).forEach(k => {
+      const o = document.createElement('option'); o.value = k; o.textContent = m.targets[k].title; $('target').appendChild(o);
+    });
+    if (!m.aiReady) { auto.disabled = true; $('target').value = Object.keys(m.targets)[0]; $('modeAi').disabled = true; $('modeAi').parentElement.title = 'ИИ не настроен: меню → Настройки → Настройки ИИ'; }
+    updateHint();
+  }).withFailureHandler(e => setStatus(e.message, true)).getImportMeta();
+
+  function updateHint() {
+    const v = $('target').value;
+    if (v === 'auto') {
+      $('hint').textContent = 'ИИ перенесёт все строки из файла и сам разложит их: склад, выдано сотрудникам, мебель по местам. Перед записью всё можно проверить и поправить.';
+      $('modeAi').checked = true; $('modeDirect').disabled = true;
+    } else {
+      const t = meta.targets[v];
+      $('hint').textContent = t.hint + ' Колонки: ' + t.fields.map(f => f.label).join(', ') + '.';
+      if (!bin) $('modeDirect').disabled = false;
+    }
+    $('previewBlock').classList.add('hidden');
+  }
+  $('target').addEventListener('change', updateHint);
+
+  $('pasteToggle').addEventListener('click', () => $('pasteWrap').classList.toggle('hidden'));
+
+  $('file').addEventListener('change', ev => {
+    const f = ev.target.files[0];
+    if (!f) return;
+    wb = null; bin = null; pdfRows = null;
+    const reader = new FileReader();
+    const isAiOnly = AI_TYPES.indexOf(f.type) >= 0 || /\.(pdf|png|jpe?g|webp)$/i.test(f.name);
+
+    if (isAiOnly) {
+      if (!meta.aiReady) { setStatus('PDF и фото разбираются только через ИИ, а он не настроен: меню → Настройки → Настройки ИИ', true); return; }
+      if (f.size > 15 * 1024 * 1024) { setStatus('Файл больше 15 МБ — разбейте его на части', true); return; }
+      reader.onload = async e => {
+        const url = String(e.target.result);
+        const isPdf = /\.pdf$/i.test(f.name) || f.type === 'application/pdf';
+        bin = { name: f.name, mimeType: f.type || (isPdf ? 'application/pdf' : 'image/jpeg'), data: url.slice(url.indexOf(',') + 1), pages: 1 };
+        $('modeAi').checked = true; $('modeDirect').disabled = true;
+        $('sheetWrap').classList.add('hidden');
+        if (isPdf) {
+          setStatus('Читаю PDF…');
+          try {
+            const res = await readPdfText(bin.data);
+            bin.pages = res.pages;
+            if (res.rows.length > 1) {
+              pdfRows = res.rows;
+              setStatus('PDF прочитан: ' + res.pages + ' стр., ' + res.rows.length + ' строк. ИИ разберёт их частями.');
+              return;
+            }
+          } catch (err) { console.warn(err); }
+          setStatus('В PDF нет текста (похоже на скан) — ИИ прочитает его как изображение, по несколько страниц за раз.');
+          return;
+        }
+        setStatus('Файл загружен: ' + f.name + '. Фото разбирает ИИ.');
+      };
+      reader.readAsDataURL(f);
+      return;
+    }
+
+    if ($('target').value !== 'auto') $('modeDirect').disabled = false;
+    reader.onload = e => {
+      try {
+        wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array' });
+        $('sheet').innerHTML = '';
+        wb.SheetNames.forEach(n => { const o = document.createElement('option'); o.value = n; o.textContent = n; $('sheet').appendChild(o); });
+        $('sheetWrap').classList.toggle('hidden', wb.SheetNames.length < 2);
+        setStatus('Файл прочитан: ' + f.name);
+      } catch (err) { setStatus('Не удалось прочитать файл: ' + err.message, true); }
+    };
+    reader.readAsArrayBuffer(f);
+  });
+
+  /** Достаёт из PDF текст построчно: склеивает слова по высоте, колонки разделяет табуляцией. */
+  async function readPdfText(base64) {
+    const raw = atob(base64), bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    const doc = await pdfjsLib.getDocument({ data: bytes }).promise;
+    const rows = [];
+    for (let p = 1; p <= doc.numPages; p++) {
+      const content = await (await doc.getPage(p)).getTextContent();
+      const lines = [];
+      content.items.forEach(it => {
+        const str = String(it.str || '');
+        if (!str.trim()) return;
+        const x = it.transform[4], y = it.transform[5];
+        let line = lines.find(l => Math.abs(l.y - y) < 3);
+        if (!line) { line = { y, parts: [] }; lines.push(line); }
+        line.parts.push({ x, end: x + (it.width || 0), str });
+      });
+      lines.sort((a, b) => b.y - a.y).forEach(l => {
+        l.parts.sort((a, b) => a.x - b.x);
+        const cells = [];
+        let prevEnd = null;
+        l.parts.forEach(pt => {
+          if (prevEnd === null || pt.x - prevEnd > 6) cells.push(pt.str.trim());
+          else cells[cells.length - 1] += (pt.x - prevEnd > 1 ? ' ' : '') + pt.str.trim();
+          prevEnd = pt.end;
+        });
+        rows.push(cells);
+      });
+    }
+    return { pages: doc.numPages, rows };
+  }
+
+  function getRows() {
+    const pasted = $('paste').value.trim();
+    if (!$('pasteWrap').classList.contains('hidden') && pasted) {
+      const lines = pasted.split(/\r?\n/);
+      const sep = pasted.indexOf('\t') >= 0 ? '\t' : (pasted.indexOf(';') >= 0 ? ';' : ',');
+      return lines.map(l => l.split(sep));
+    }
+    if (!wb) return null;
+    const ws = wb.Sheets[$('sheet').value || wb.SheetNames[0]];
+    return XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
+  }
+
+  const run = (fn, ...args) => new Promise((ok, fail) =>
+    google.script.run.withSuccessHandler(ok).withFailureHandler(fail)[fn](...args));
+
+  function handleResult(res) {
+    $('previewBtn').disabled = false;
+    if (!$('direct').checked) { render(res.sections); return; }
+    // Сразу записываем всё, где есть главное поле; остальное показываем для дописывания
+    const jobs = [], rest = {};
+    Object.keys(res.sections).forEach(k => {
+      const good = res.sections[k].filter(r => r.ok).map(r => ({ data: r.data }));
+      const bad = res.sections[k].filter(r => !r.ok);
+      if (good.length) jobs.push({ target: k, rows: good });
+      if (bad.length) rest[k] = bad;
+    });
+    commitJobs(jobs, () => { if (Object.keys(rest).length) render(rest, true); });
+  }
+
+  $('previewBtn').addEventListener('click', async () => {
+    const pasted = !$('pasteWrap').classList.contains('hidden') && $('paste').value.trim();
+    const useBin = bin && !pasted && !pdfRows;
+    const rows = useBin ? null : (pdfRows && !pasted ? pdfRows : getRows());
+    if (!useBin && !rows) { setStatus('Выберите файл или вставьте строки', true); return; }
+    const target = $('target').value;
+    const mode = (useBin || (pdfRows && !pasted) || target === 'auto')
+      ? 'ai' : document.querySelector('input[name=mode]:checked').value;
+    $('previewBtn').disabled = true;
+
+    try {
+      if (mode !== 'ai') {
+        setStatus('Сопоставляю колонки…');
+        handleResult(await run('importPreview', target, mode, rows, null));
+        return;
+      }
+      // Режем на части: каждая часть — отдельный короткий запуск, лимит 6 минут не срабатывает
+      const parts = [];
+      if (useBin) {
+        const n = Math.max(1, bin.pages || 1);
+        for (let p = 1; p <= n; p += 3) parts.push({ range: { from: p, to: Math.min(n, p + 2) } });
+      } else {
+        const header = rows[0], body = rows.slice(1), SIZE = 40;
+        for (let i = 0; i < body.length; i += SIZE) parts.push({ rows: [header].concat(body.slice(i, i + SIZE)) });
+        if (!parts.length) parts.push({ rows });
+      }
+      const raw = {};
+      for (let i = 0; i < parts.length; i++) {
+        setStatus('ИИ разбирает часть ' + (i + 1) + ' из ' + parts.length + '…');
+        let res, tries = 0;
+        while (true) {
+          try {
+            res = await run('importChunk', target, parts[i].rows || null, useBin ? bin : null, parts[i].range || null);
+            break;
+          } catch (e) {
+            if (++tries >= 3) throw new Error('Часть ' + (i + 1) + ' из ' + parts.length + ': ' + e.message);
+            setStatus('Часть ' + (i + 1) + ': ошибка, пробую ещё раз…');
+            await new Promise(r => setTimeout(r, 5000));
+          }
+        }
+        Object.keys(res).forEach(k => { raw[k] = (raw[k] || []).concat(res[k]); });
+      }
+      setStatus('Проверяю результат…');
+      handleResult(await run('importFinalize', raw));
+    } catch (e) {
+      $('previewBtn').disabled = false;
+      setStatus(e.message, true);
+    }
+  });
+
+  function render(sections, leftovers) {
+    preview = sections;
+    const box = $('tables');
+    box.innerHTML = '';
+    let total = 0, warn = 0, off = 0;
+    Object.keys(sections).forEach(key => {
+      const records = sections[key], t = meta.targets[key];
+      const h = document.createElement('h3'); h.className = 'sec';
+      h.textContent = t.title + ' — ' + records.length;
+      box.appendChild(h);
+      const tbl = document.createElement('table'); tbl.dataset.target = key; box.appendChild(tbl);
+      const head = tbl.insertRow();
+      ['', ...t.fields.map(f => f.label), 'Замечания'].forEach(x => { const th = document.createElement('th'); th.textContent = x; head.appendChild(th); });
+      records.forEach(r => {
+        const tr = tbl.insertRow();
+        tr.className = !r.ok ? 'bad' : (r.flags.length ? 'warn' : '');
+        tr.insertCell().innerHTML = '<input type="checkbox"' + (r.ok ? ' checked' : '') + '>';
+        t.fields.forEach(f => {
+          const td = tr.insertCell();
+          td.contentEditable = 'true'; td.dataset.key = f.key;
+          td.textContent = r.data[f.key] == null ? '' : r.data[f.key];
+        });
+        const fl = tr.insertCell(); fl.className = 'flags'; fl.textContent = r.flags.join('; ');
+        total++; if (!r.ok) off++; else if (r.flags.length) warn++;
+      });
+    });
+    $('counts').textContent = `Строк: ${total}. С замечаниями: ${warn}. Не отмечены (нет главного поля): ${off} — допишите и отметьте вручную.`;
+    $('previewBlock').classList.remove('hidden');
+    if (leftovers) {
+      $('status').textContent += ' Ниже строки без названия, этажа или логина — допишите, отметьте и нажмите «Записать отмеченные».';
+    } else setStatus('Проверьте данные. Ячейки можно исправить прямо в таблице.');
+  }
+
+  $('commitBtn').addEventListener('click', () => {
+    const jobs = [];
+    $('tables').querySelectorAll('table').forEach(tbl => {
+      const rows = [];
+      tbl.querySelectorAll('tr').forEach(tr => {
+        const cb = tr.querySelector('input[type=checkbox]');
+        if (!cb || !cb.checked) return;
+        const data = {};
+        tr.querySelectorAll('td[data-key]').forEach(td => { data[td.dataset.key] = td.textContent.trim(); });
+        rows.push({ data });
+      });
+      if (rows.length) jobs.push({ target: tbl.dataset.target, rows });
+    });
+    if (!jobs.length) { setStatus('Не отмечено ни одной строки', true); return; }
+    commitJobs(jobs, () => $('previewBlock').classList.add('hidden'));
+  });
+
+  function commitJobs(jobs, after) {
+    if (!jobs.length) { setStatus('В файле не нашлось строк, которые можно записать сразу.', true); if (after) after(); return; }
+    $('commitBtn').disabled = true; $('previewBtn').disabled = true;
+    setStatus('Записываю…');
+    const done = [];
+    const next = () => {
+      const job = jobs.shift();
+      if (!job) {
+        $('commitBtn').disabled = false; $('previewBtn').disabled = false;
+        setStatus('Готово. ' + done.join(' '));
+        if (after) after();
+        return;
+      }
+      google.script.run
+        .withSuccessHandler(msg => { done.push(meta.targets[job.target].title + ': ' + msg + '.'); next(); })
+        .withFailureHandler(e => { $('commitBtn').disabled = false; $('previewBtn').disabled = false; setStatus(e.message, true); })
+        .importCommit(job.target, job.rows);
+    };
+    next();
+  }
+</script>
+</body>
+</html>
