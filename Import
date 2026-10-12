@@ -1,0 +1,500 @@
+/**
+ * Загрузка данных из файла: прямое сопоставление колонок или через ИИ.
+ * Порядок всегда такой: предпросмотр → проверка человеком → запись.
+ */
+
+const IMPORT_TARGETS = {
+  stock: {
+    title: 'Склад: позиции и остатки',
+    hint: 'Новые позиции попадут в каталог, количество — в журнал как начальный остаток.',
+    fields: [
+      { key: 'name', label: 'Позиция', required: true, syn: ['позиция', 'наименование', 'название', 'товар', 'предмет', 'item', 'name'] },
+      { key: 'category', label: 'Категория', syn: ['категория', 'группа', 'category'] },
+      { key: 'qty', label: 'Количество на складе', num: true, syn: ['количество', 'кол-во', 'колво', 'остаток', 'qty', 'шт'] },
+      { key: 'forEmployees', label: 'Выдаётся сотрудникам', syn: ['выдается сотрудникам', 'для сотрудников', 'выдается'] },
+      { key: 'audience', label: 'Кому выдаётся', syn: ['кому выдается', 'кому', 'формат'] },
+      { key: 'min', label: 'Мин. остаток', num: true, syn: ['мин. остаток', 'минимальный остаток', 'неснижаемый', 'минимум', 'мин'] }
+    ]
+  },
+  issued: {
+    title: 'Выдано сотрудникам',
+    hint: 'Попадёт на лист «Выдано». Складские остатки не меняет.',
+    fields: [
+      { key: 'login', label: 'Логин', required: true, syn: ['логин', 'login', 'сотрудник', 'кому'] },
+      { key: 'item', label: 'Позиция', required: true, syn: ['позиция', 'что выдано', 'наименование', 'предмет', 'товар', 'item'] },
+      { key: 'floor', label: 'Этаж', num: true, syn: ['этаж', 'floor'] },
+      { key: 'desk', label: 'Стол', syn: ['стол', 'номер стола', 'рабочее место', 'desk'] },
+      { key: 'format', label: 'Формат работы', syn: ['формат работы', 'формат', 'format'] },
+      { key: 'date', label: 'Дата выдачи', syn: ['дата выдачи', 'дата', 'date'] }
+    ]
+  },
+  furniture: {
+    title: 'Мебель по местам',
+    hint: 'Для совпадающих «этаж + помещение + позиция» количество заменится на значение из файла.',
+    fields: [
+      { key: 'floor', label: 'Этаж', required: true, num: true, syn: ['этаж', 'floor'] },
+      { key: 'room', label: 'Помещение / зона', syn: ['помещение', 'кабинет', 'зона', 'комната', 'room'] },
+      { key: 'item', label: 'Позиция', required: true, syn: ['позиция', 'мебель', 'наименование', 'предмет', 'item'] },
+      { key: 'qty', label: 'Количество', required: true, num: true, syn: ['количество', 'кол-во', 'колво', 'шт', 'qty'] }
+    ]
+  }
+};
+
+function showImportDialog() {
+  const html = HtmlService.createHtmlOutputFromFile('ImportDialog').setWidth(1000).setHeight(680);
+  SpreadsheetApp.getUi().showModalDialog(html, 'Загрузка данных');
+}
+
+/** Для диалога: какие есть цели загрузки и настроен ли ИИ. */
+function getImportMeta() {
+  const targets = {};
+  Object.keys(IMPORT_TARGETS).forEach(k => {
+    const t = IMPORT_TARGETS[k];
+    targets[k] = { title: t.title, hint: t.hint, fields: t.fields.map(f => ({ key: f.key, label: f.label, required: !!f.required })) };
+  });
+  return { targets, aiReady: !!PropertiesService.getScriptProperties().getProperty('AI_API_KEY') };
+}
+
+/**
+ * target: 'auto' (ИИ сам раскладывает по разделам) или stock | issued | furniture.
+ * rows: строки из таблицы/CSV (первая — заголовки). file: {mimeType, data(base64), name} для PDF и фото.
+ * Возвращает {sections: {stock:[...], issued:[...], furniture:[...]}} — только непустые разделы.
+ */
+function importPreview(target, mode, rows, file) {
+  if (target !== 'auto' && !IMPORT_TARGETS[target]) throw new Error('Неизвестный раздел загрузки');
+  const hasFile = file && file.data;
+  if (!hasFile) {
+    rows = (rows || []).filter(r => r && r.some(c => String(c).trim() !== ''));
+    if (!rows.length) throw new Error('В файле нет данных');
+  }
+
+  let raw;
+  if (!hasFile && mode !== 'ai' && target !== 'auto') {
+    if (rows.length < 2) throw new Error('Нужна строка заголовков и хотя бы одна строка данных');
+    raw = {}; raw[target] = directMap_(IMPORT_TARGETS[target], rows);
+  } else {
+    raw = aiExtract_(target, hasFile ? null : rows, hasFile ? file : null, hasFile ? file.pages : 0);
+  }
+
+  const sections = {};
+  Object.keys(IMPORT_TARGETS).forEach(k => {
+    const list = (raw[k] || []).filter(r => r && typeof r === 'object');
+    if (list.length) sections[k] = normalizeRecords_(k, list);
+  });
+  if (!Object.keys(sections).length) {
+    throw new Error('ИИ не вернул ни одной строки. Ответ ИИ: ' + String(raw._raw || '').slice(0, 300));
+  }
+  return { sections };
+}
+
+/**
+ * Одна часть файла = один короткий запуск скрипта (лимит Google — 6 минут на запуск).
+ * Окно загрузки само режет файл на части и вызывает это по очереди.
+ * rows — часть строк (первая — заголовки); file+range — страницы скана/фото.
+ */
+function importChunk(target, rows, file, range) {
+  if (target !== 'auto' && !IMPORT_TARGETS[target]) throw new Error('Неизвестный раздел загрузки');
+  const raw = file && file.data
+    ? aiExtract_(target, null, file, file.pages, range)
+    : aiExtract_(target, rows, null, 0);
+  const out = {};
+  Object.keys(IMPORT_TARGETS).forEach(k => { if (raw[k] && raw[k].length) out[k] = raw[k]; });
+  return out;
+}
+
+/** Собранные из всех частей строки → проверенные записи для предпросмотра/записи. */
+function importFinalize(raw) {
+  const sections = {};
+  Object.keys(IMPORT_TARGETS).forEach(k => {
+    const list = (raw[k] || []).filter(r => r && typeof r === 'object');
+    if (list.length) sections[k] = normalizeRecords_(k, list);
+  });
+  if (!Object.keys(sections).length) throw new Error('ИИ не нашёл в файле ни одной строки с предметами.');
+  return { sections };
+}
+
+function directMap_(t, rows) {
+  const headers = rows[0].map(normalize_);
+  const used = new Set();
+  const map = {};
+  // Сначала точные совпадения, потом частичные — по самому длинному синониму
+  t.fields.forEach(f => {
+    const i = headers.findIndex((h, idx) => !used.has(idx) && (h === normalize_(f.label) || f.syn.indexOf(h) >= 0));
+    if (i >= 0) { map[f.key] = i; used.add(i); }
+  });
+  t.fields.forEach(f => {
+    if (map[f.key] !== undefined) return;
+    let best = -1, bestLen = 0;
+    headers.forEach((h, idx) => {
+      if (used.has(idx)) return;
+      f.syn.forEach(s => { if (h.indexOf(s) >= 0 && s.length > bestLen) { best = idx; bestLen = s.length; } });
+    });
+    if (best >= 0) { map[f.key] = best; used.add(best); }
+  });
+  const missing = t.fields.filter(f => f.required && map[f.key] === undefined).map(f => f.label);
+  if (missing.length) {
+    throw new Error('Не нашла колонки: ' + missing.join(', ') + '. Переименуйте заголовки в файле или используйте режим «Через ИИ».');
+  }
+  return rows.slice(1).map(r => {
+    const o = {};
+    t.fields.forEach(f => { o[f.key] = map[f.key] === undefined ? '' : r[map[f.key]]; });
+    return o;
+  });
+}
+
+function normAudience_(v) {
+  const s = normalize_(v);
+  if (/гибрид|hybrid/.test(s)) return AUDIENCE.BOTH;
+  if (/офис|office/.test(s)) return AUDIENCE.OFFICE;
+  return '';
+}
+
+function normFormat_(v) {
+  const s = normalize_(v);
+  if (/гибрид|hybrid/.test(s)) return FORMAT.HYBRID;
+  if (/удал|remote/.test(s)) return FORMAT.REMOTE;
+  if (/офис|office/.test(s)) return FORMAT.OFFICE;
+  return '';
+}
+
+function normalizeRecords_(target, recs) {
+  const t = IMPORT_TARGETS[target];
+  const catalog = getCatalog_();
+  const cats = getCategories_().map(normalize_);
+  const seen = {};
+  return recs.map(r => {
+    const o = {};
+    const flags = [];
+    let ok = true;
+    t.fields.forEach(f => {
+      let v = r[f.key];
+      v = v == null ? '' : String(v).trim();
+      if (f.num && v !== '') {
+        const n = parseFloat(v.replace(',', '.').replace(/[^\d.\-]/g, ''));
+        v = isNaN(n) ? '' : n;
+      }
+      o[f.key] = v;
+      if (f.required && v === '') flags.push('нет «' + f.label + '»');
+    });
+
+    const itemKey = 'name' in o ? 'name' : 'item';
+    if (!o[itemKey]) ok = false;
+    if (target === 'issued' && !o.login) ok = false;
+    if (target === 'furniture' && o.floor === '') ok = false;
+    if (o[itemKey]) {
+      const it = findItemByName_(catalog, o[itemKey]);
+      if (it) o[itemKey] = it.name; else flags.push('новая позиция');
+    }
+    if (o.category && cats.indexOf(normalize_(o.category)) < 0) flags.push('новая категория');
+    if ('forEmployees' in o) o.forEmployees = o.forEmployees === '' ? '' : (isYes_(o.forEmployees) ? 'да' : (isNo_(o.forEmployees) ? 'нет' : ''));
+    if ('audience' in o) o.audience = normAudience_(o.audience);
+    if ('format' in o) o.format = normFormat_(o.format);
+    if ('login' in o) o.login = String(o.login).toLowerCase().replace(/^@/, '').trim();
+    if (target === 'issued' && o.format === FORMAT.REMOTE) flags.push('удалённый формат');
+    if (target === 'furniture' && o.floor !== '' && o.floor > getFloorsCount_()) flags.push('этаж больше, чем в настройках офиса');
+
+    const key = target === 'stock' ? normalize_(o.name)
+      : target === 'issued' ? normalize_(o.login) + '|' + normalize_(o.item)
+      : o.floor + '|' + normalize_(o.room) + '|' + normalize_(o.item);
+    if (seen[key]) flags.push('дубль в файле');
+    seen[key] = true;
+
+    return { data: o, flags, ok };
+  });
+}
+
+/** records: [{data:{...}}] — уже проверенные человеком строки из диалога. */
+function importCommit(target, records) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  const by = Session.getActiveUser().getEmail() || 'импорт';
+  let summary = '';
+  try {
+    const cats = getCategories_();
+    const w = catalogWriter_();
+    const journal = [];
+    const rows = (records || []).map(r => r.data);
+
+    if (target === 'stock') {
+      let created = 0, updated = 0, qtyTotal = 0;
+      rows.forEach(d => {
+        if (!d.name) return;
+        const category = d.category ? ensureCategory_(d.category, cats) : '';
+        const fe = d.forEmployees ? d.forEmployees === 'да' : !!d.audience;
+        const before = findItemByName_(w.catalog, d.name);
+        const it = w.ensure({ name: d.name, category, forEmployees: fe, audience: d.audience, min: d.min });
+        if (before) {
+          if (category) updateCatalogField_(it, 'Категория', category);
+          if (d.forEmployees) updateCatalogField_(it, 'Выдаётся сотрудникам', d.forEmployees);
+          if (d.audience) updateCatalogField_(it, 'Кому выдаётся', d.audience);
+          if (d.min !== '' && d.min != null) updateCatalogField_(it, 'Мин. остаток', d.min);
+          updated++;
+        } else created++;
+        const q = Number(d.qty) || 0;
+        if (q > 0) {
+          journal.push({ op: OPS.INIT, id: it.id, name: it.name, qty: q, from: PLACE.IMPORT, to: PLACE.STOCK, by, comment: 'Загрузка из файла' });
+          qtyTotal += q;
+        }
+      });
+      summary = `Новых позиций: ${created}, обновлено: ${updated}, поставлено на склад: ${qtyTotal} шт.`;
+    }
+
+    if (target === 'issued') {
+      const list = [];
+      rows.forEach(d => {
+        if (!d.login || !d.item) return;
+        const it = w.ensure({ name: d.item, forEmployees: true });
+        const date = parseDate_(d.date);
+        list.push({ login: d.login, floor: d.floor, desk: d.desk, format: d.format, item: it.name, date, req: 'импорт' });
+        journal.push({ op: OPS.INIT_ISSUED, id: it.id, name: it.name, qty: 1, from: PLACE.IMPORT, to: PLACE.EMPLOYEE,
+                       login: d.login, floor: d.floor, desk: d.desk, by, date, comment: 'Загрузка из файла' });
+      });
+      w.flush();
+      addIssued_(list);
+      summary = `Записей о выдаче: ${list.length}`;
+    }
+
+    if (target === 'furniture') {
+      let n = 0;
+      rows.forEach(d => {
+        if (d.floor === '' || !d.item) return;
+        const it = w.ensure({ name: d.item, category: ensureCategory_('Мебель', cats), forEmployees: false });
+        upsertFurniture_(d.floor, d.room, it.name, Number(d.qty) || 0, 'set', 'Загрузка из файла');
+        n++;
+      });
+      summary = `Строк мебели по местам: ${n}`;
+    }
+
+    w.flush();
+    appendJournal_(journal);
+    recalcStock_();
+  } finally {
+    lock.releaseLock();
+  }
+  try { syncFormCatalog_(); } catch (e) { console.warn(e); }
+  return summary;
+}
+
+// ---------- ИИ ----------
+
+const AI_FIELD_HINTS = {
+  stock: '"name" — название предмета; "category" — категория; "qty" — количество числом; ' +
+         '"forEmployees" — "да"/"нет", выдаётся ли сотрудникам; "audience" — "Офисный" или "Офисный + гибридный"; "min" — минимальный остаток.',
+  issued: '"login" — логин или ФИО сотрудника, как в файле; "item" — что выдано; "floor" — этаж числом; "desk" — номер стола; ' +
+          '"format" — "Офисный"/"Гибридный"/"Удалённый"; "date" — дата ДД.ММ.ГГГГ. Один предмет — один объект.',
+  furniture: '"floor" — этаж числом; "room" — помещение/зона/кабинет; "item" — вид мебели; "qty" — количество числом.'
+};
+
+const TRUNCATED = '<<TRUNCATED>>';
+
+/** Порядок значений в компактном ответе ИИ: [значение1, значение2, ...] вместо объектов. */
+function aiColumns_(key) { return IMPORT_TARGETS[key].fields.map(f => f.key); }
+
+/**
+ * Просим ИИ перенести ВСЁ из файла, без отбрасывания строк.
+ * target='auto' — ИИ сам решает, в какой раздел класть строку.
+ * rows — строки таблицы (в т.ч. текст PDF, разобранный в браузере); file — скан/фото, pages — число страниц.
+ */
+function aiExtract_(target, rows, file, pages, range) {
+  const keys = target === 'auto' ? Object.keys(IMPORT_TARGETS) : [target];
+  const catalog = getCatalog_().map(i => i.name);
+  const intro =
+    'Перенеси данные из файла учёта офиса (мебель, аксессуары, кому что выдано) в JSON.\n\n' +
+    'Разделы и порядок значений в строке:\n' +
+    keys.map(k => '- "' + k + '" (' + IMPORT_TARGETS[k].title + '): [' + aiColumns_(k).join(', ') + ']\n  ' + AI_FIELD_HINTS[k]).join('\n') + '\n\n' +
+    (keys.length > 1
+      ? 'Куда класть строку: есть сотрудник (логин/ФИО) — "issued"; есть этаж или помещение без сотрудника — "furniture"; ' +
+        'иначе (просто перечень предметов с количеством) — "stock".\n'
+      : '') +
+    'Правила:\n' +
+    '- Каждая строка — МАССИВ значений в указанном порядке (не объект). Пустое значение — "".\n' +
+    '- Перенеси ВСЕ строки с предметами. НЕ пропускай строку из-за того, что каких-то полей нет.\n' +
+    '- Пропускай только пустые строки, заголовки и строки «Итого».\n' +
+    '- Значения бери как в файле, ничего не выдумывай. Пиши коротко, без пояснений.\n' +
+    (catalog.length ? '- Если предмет явно совпадает с позицией каталога, пиши название как в каталоге: ' + JSON.stringify(catalog) + '\n' : '') +
+    '- Ответ — только JSON-объект вида {' + keys.map(k => '"' + k + '": [[...], ...]').join(', ') + '}.\n\n';
+
+  const out = {};
+  const merge = obj => keys.forEach(k => { if (obj[k] && obj[k].length) out[k] = (out[k] || []).concat(obj[k]); });
+  const started = Date.now();
+  const timeCheck = () => {
+    if (Date.now() - started > 300000) throw new Error('Файл слишком большой для одного раза (больше 5 минут обработки). Разбейте его на части.');
+  };
+
+  if (file) {
+    // Скан/фото: читаем по диапазонам страниц; если ответ оборвался — делим диапазон пополам
+    const run = (from, to) => {
+      timeCheck();
+      const scope = pages > 1 ? ' Обработай ТОЛЬКО страницы с ' + from + ' по ' + to + '.' : '';
+      const text = callAI_(intro + 'Данные — во вложенном файле «' + (file.name || 'файл') + '».' + scope, file);
+      if (text.indexOf(TRUNCATED) === 0) {
+        if (to > from) { const mid = Math.floor((from + to) / 2); run(from, mid); run(mid + 1, to); return; }
+        merge(parseAiJson_(text.slice(TRUNCATED.length), keys, true)); // спасаем, что успело прийти
+        return;
+      }
+      out._raw = text;
+      merge(parseAiJson_(text, keys));
+    };
+    if (range) { run(range.from, range.to); return out; }
+    const n = Math.max(1, Number(pages) || 1);
+    for (let p = 1; p <= n; p += 5) run(p, Math.min(n, p + 4));
+    return out;
+  }
+
+  const header = rows[0];
+  const toTsv = list => list.map(r => r.map(c => String(c).replace(/\t|\n/g, ' ')).join('\t')).join('\n');
+  const run = part => {
+    timeCheck();
+    const text = callAI_(intro + 'Первая строка может быть заголовками: ' + header.join('\t') + '\nДанные (TSV):\n' + toTsv(part), null);
+    if (text.indexOf(TRUNCATED) === 0) {
+      if (part.length > 5) { const mid = Math.ceil(part.length / 2); run(part.slice(0, mid)); run(part.slice(mid)); return; }
+      merge(parseAiJson_(text.slice(TRUNCATED.length), keys, true));
+      return;
+    }
+    out._raw = text;
+    merge(parseAiJson_(text, keys));
+  };
+  const CHUNK = 60;
+  for (let i = 0; i < rows.length; i += CHUNK) run(rows.slice(i, i + CHUNK));
+  return out;
+}
+
+/**
+ * Разбирает ответ ИИ. Строки могут быть массивами (компактно) или объектами.
+ * partial=true — ответ оборван: берём все целые строки, что успели прийти.
+ */
+function parseAiJson_(text, keys, partial) {
+  let clean = String(text || '').replace(/```(?:json)?/gi, '').trim();
+  let val = null;
+  try { val = JSON.parse(clean); } catch (e) {
+    const s = clean.search(/[\[{]/), e2 = Math.max(clean.lastIndexOf('}'), clean.lastIndexOf(']'));
+    if (s >= 0 && e2 > s) { try { val = JSON.parse(clean.slice(s, e2 + 1)); } catch (e3) { val = null; } }
+  }
+  if (val === null) {
+    if (!partial) throw new Error('ИИ ответил не в формате JSON: ' + clean.slice(0, 200));
+    val = salvage_(clean, keys);
+  }
+
+  let o = {};
+  if (Array.isArray(val)) o[keys[0]] = val;
+  else {
+    keys.forEach(k => { if (Array.isArray(val[k])) o[k] = val[k]; });
+    if (!Object.keys(o).length && keys.length === 1) {
+      const arr = Object.values(val).find(Array.isArray);
+      if (arr) o[keys[0]] = arr;
+    }
+  }
+  Object.keys(o).forEach(k => {
+    const cols = aiColumns_(k);
+    o[k] = o[k].map(r => {
+      if (!Array.isArray(r)) return r;
+      const obj = {};
+      cols.forEach((c, i) => { obj[c] = r[i] == null ? '' : r[i]; });
+      return obj;
+    });
+  });
+  return o;
+}
+
+/** Достаёт целые строки-массивы из оборванного ответа по каждому разделу. */
+function salvage_(text, keys) {
+  const res = {};
+  keys.forEach(k => {
+    const at = text.indexOf('"' + k + '"');
+    if (at < 0) return;
+    const nextKey = keys.map(x => text.indexOf('"' + x + '"', at + 1)).filter(i => i > at);
+    const chunk = text.slice(at, nextKey.length ? Math.min.apply(null, nextKey) : text.length);
+    const rows = chunk.match(/\[(?:"(?:[^"\\]|\\.)*"|[^\[\]"])*\]/g) || [];
+    res[k] = rows.map(r => { try { return JSON.parse(r); } catch (e) { return null; } }).filter(Array.isArray);
+  });
+  return res;
+}
+
+/**
+ * Вызов ИИ. file: {mimeType, data(base64)} — необязательно.
+ * Провайдер: свойство AI_PROVIDER = gemini (по умолчанию) | anthropic | yandex.
+ */
+function callAI_(prompt, file) {
+  const p = PropertiesService.getScriptProperties();
+  const provider = (p.getProperty('AI_PROVIDER') || 'gemini').toLowerCase().trim();
+  const key = p.getProperty('AI_API_KEY');
+  if (!key) throw new Error('ИИ не настроен: меню → Настройки → Настройки ИИ');
+  const post = (url, headers, body) => UrlFetchApp.fetch(url, {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers, payload: JSON.stringify(body)
+  });
+  const parse = (res, name) => {
+    let j = null;
+    try { j = JSON.parse(res.getContentText()); } catch (e) { /* не JSON */ }
+    if (res.getResponseCode() !== 200) {
+      const m = j && j.error ? (j.error.message || JSON.stringify(j.error)) : res.getContentText().slice(0, 300);
+      throw new Error(name + ' (' + res.getResponseCode() + '): ' + m);
+    }
+    return j;
+  };
+
+  if (provider === 'gemini' || provider === 'google') {
+    const model = p.getProperty('AI_MODEL') || 'gemini-flash-latest';
+    const parts = [{ text: prompt }];
+    if (file) parts.push({ inline_data: { mime_type: file.mimeType, data: file.data } });
+    const models = [model].concat(String(p.getProperty('AI_FALLBACK_MODEL') || 'gemini-flash-lite-latest')
+      .split(',').map(x => x.trim()).filter(x => x && x !== model));
+    const body = cfg => ({ contents: [{ role: 'user', parts }],
+      generationConfig: Object.assign({ temperature: 0.1, responseMimeType: 'application/json', maxOutputTokens: 65536 }, cfg) });
+    const BUSY = [429, 500, 502, 503, 504];
+    let res = null;
+    // Перегрузка у Google обычно на секунды: пробуем ещё раз с паузой, потом переходим на запасную модель
+    outer:
+    for (const m of models) {
+      const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(m) + ':generateContent';
+      for (const wait of [0, 3000, 8000, 15000]) {
+        if (wait) Utilities.sleep(wait);
+        // «Размышления» модели съедают лимит ответа — для переноса данных они не нужны
+        res = post(url, { 'x-goog-api-key': key }, body({ thinkingConfig: { thinkingBudget: 0 } }));
+        if (res.getResponseCode() === 400) res = post(url, { 'x-goog-api-key': key }, body({ thinkingConfig: { thinkingLevel: 'low' } }));
+        if (res.getResponseCode() === 400) res = post(url, { 'x-goog-api-key': key }, body({}));
+        if (BUSY.indexOf(res.getResponseCode()) < 0) break outer;
+      }
+    }
+    if (BUSY.indexOf(res.getResponseCode()) >= 0) {
+      throw new Error('Gemini сейчас перегружен (' + res.getResponseCode() + '), повторные попытки не помогли. Попробуйте через несколько минут.');
+    }
+    const j = parse(res, 'Gemini');
+    const cand = j.candidates && j.candidates[0];
+    if (!cand || !cand.content || !cand.content.parts) {
+      const why = (cand && cand.finishReason) || (j.promptFeedback && j.promptFeedback.blockReason) || 'пустой ответ';
+      throw new Error('Gemini не вернул данные: ' + why);
+    }
+    const text = cand.content.parts.filter(x => !x.thought).map(x => x.text || '').join('');
+    return cand.finishReason === 'MAX_TOKENS' ? TRUNCATED + text : text;
+  }
+
+  if (provider === 'yandex') {
+    if (file) throw new Error('YandexGPT не читает PDF и картинки. Используйте Gemini или загрузите таблицу.');
+    const folder = p.getProperty('YANDEX_FOLDER_ID');
+    const model = p.getProperty('AI_MODEL') || 'yandexgpt/latest';
+    const j = parse(post('https://llm.api.cloud.yandex.net/foundationModels/v1/completion',
+      { Authorization: 'Api-Key ' + key, 'x-folder-id': folder },
+      { modelUri: 'gpt://' + folder + '/' + model,
+        completionOptions: { stream: false, temperature: 0.1, maxTokens: '8000' },
+        messages: [{ role: 'user', text: prompt }] }), 'YandexGPT');
+    return j.result.alternatives[0].message.text;
+  }
+
+  if (provider === 'anthropic' || provider === 'claude') {
+    const content = [];
+    if (file) {
+      content.push(file.mimeType === 'application/pdf'
+        ? { type: 'document', source: { type: 'base64', media_type: file.mimeType, data: file.data } }
+        : { type: 'image', source: { type: 'base64', media_type: file.mimeType, data: file.data } });
+    }
+    content.push({ type: 'text', text: prompt });
+    const j = parse(post('https://api.anthropic.com/v1/messages',
+      { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+      { model: p.getProperty('AI_MODEL') || 'claude-sonnet-5-5', max_tokens: 8000,
+        messages: [{ role: 'user', content }] }), 'Claude API');
+    const text = j.content.map(c => c.text || '').join('');
+    return j.stop_reason === 'max_tokens' ? TRUNCATED + text : text;
+  }
+
+  throw new Error('Неизвестный провайдер ИИ «' + provider + '». Укажите gemini, anthropic или yandex.');
+}
