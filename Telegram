@@ -1,0 +1,227 @@
+/**
+ * Telegram: уведомления о заявках, кнопки действий, приём нажатий (webhook).
+ * Один бот = один webhook, поэтому для каждого офиса нужен свой бот.
+ */
+
+function tg_(method, payload) {
+  const token = PropertiesService.getScriptProperties().getProperty('TG_TOKEN');
+  if (!token) return null;
+  const res = UrlFetchApp.fetch('https://api.telegram.org/bot' + token + '/' + method, {
+    method: 'post', contentType: 'application/json',
+    payload: JSON.stringify(payload), muteHttpExceptions: true
+  });
+  let j = null;
+  try { j = JSON.parse(res.getContentText()); } catch (e) { /* не JSON */ }
+  if (!j || !j.ok) console.warn('Telegram ' + method + ': ' + res.getContentText());
+  return j;
+}
+
+function connectTelegram() {
+  const ui = SpreadsheetApp.getUi();
+  const url = String(getSetting_('URL веб-приложения') || '').trim() || ScriptApp.getService().getUrl();
+  if (!url) {
+    ui.alert('Сначала разверните скрипт как веб-приложение и вставьте ссылку в «Офис» → «URL веб-приложения».');
+    return;
+  }
+  const j = tg_('setWebhook', { url, drop_pending_updates: true, allowed_updates: ['message', 'callback_query'] });
+  ui.alert(j && j.ok ? 'Бот подключён. Ответственные должны написать боту /start.'
+                     : 'Не получилось подключить. Проверьте токен и ссылку веб-приложения.');
+}
+
+// ---------- Кому слать ----------
+
+function getResponsibles_() {
+  const { rows } = readRows_('RESP');
+  return rows.map(r => ({
+    name: r[ci_('RESP', 'ФИО')],
+    username: String(r[ci_('RESP', 'Telegram (@username)')] || '').replace(/^@/, '').trim().toLowerCase(),
+    chatId: String(r[ci_('RESP', 'Telegram chat_id')] || '').trim(),
+    notify: isYes_(r[ci_('RESP', 'Получает уведомления')])
+  })).filter(x => x.name || x.username);
+}
+
+function notifyTargets_() {
+  const mode = getSetting_('Куда слать уведомления');
+  const group = String(getSetting_('chat_id общего чата') || '').trim();
+  if (mode !== 'Лично ответственным' && group) return [group];
+  return getResponsibles_().filter(x => x.notify && x.chatId).map(x => x.chatId);
+}
+
+function isAuthorized_(from) {
+  const list = getResponsibles_();
+  if (!list.length) return true; // пока никого не завели — не блокируем
+  const u = String(from.username || '').toLowerCase();
+  return list.some(x => (x.chatId && x.chatId === String(from.id)) || (u && x.username === u));
+}
+
+function displayName_(from) {
+  const me = getResponsibles_().find(x => x.chatId === String(from.id) ||
+    (from.username && x.username === String(from.username).toLowerCase()));
+  if (me && me.name) return me.name;
+  return [from.first_name, from.last_name].filter(Boolean).join(' ') || ('@' + from.username);
+}
+
+// ---------- Сообщение о заявке ----------
+
+function esc_(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function buildRequestText_(r) {
+  const icons = {};
+  icons[STATUS.NEW] = '🆕'; icons[STATUS.WORK] = '🛠'; icons[STATUS.REJECTED] = '❌';
+  icons[STATUS.ISSUED] = '✅'; icons[STATUS.RETURNED] = '📥';
+  const tpl = String(getSetting_('Ссылка на профиль (шаблон)') || '');
+  const who = tpl
+    ? '<a href="' + esc_(tpl.replace('{login}', encodeURIComponent(r.login))) + '">' + esc_(r.login) + '</a>'
+    : esc_(r.login);
+  const open = r.status === STATUS.NEW || r.status === STATUS.WORK;
+  const catalog = (r.action === ACTION.ORDER && open) ? getCatalog_() : [];
+
+  const lines = [
+    (icons[r.status] || '•') + ' <b>' + esc_(r.id) + '</b> · ' + esc_(r.action),
+    '👤 ' + who + (r.format ? ' · ' + esc_(r.format) : ''),
+    '📍 Этаж ' + esc_(r.floor) + ', стол ' + esc_(r.desk),
+    '',
+    '<b>Позиции:</b>'
+  ];
+  r.items.forEach(n => {
+    let s = '• ' + esc_(n);
+    if (catalog.length) {
+      const it = findItemByName_(catalog, n);
+      if (!it) s += ' — нет в каталоге';
+      else if (r.status === STATUS.NEW) s += ' — на складе ' + it.inStock + ', доступно ' + it.available;
+      else s += ' — на складе ' + it.inStock;
+    }
+    lines.push(s);
+  });
+  if (r.reason) lines.push('', 'Причина сдачи: ' + esc_(r.reason) + (r.newFormat ? ' → ' + esc_(r.newFormat) : ''));
+  if (r.checks) lines.push('', '<b>Проверки:</b>', esc_(r.checks));
+  lines.push('', 'Статус: <b>' + esc_(r.status) + '</b>' + (r.by ? ' · ' + esc_(r.by) : ''));
+  if (r.status === STATUS.REJECTED && r.rejectReason) lines.push('Причина отклонения: ' + esc_(r.rejectReason));
+  return lines.join('\n');
+}
+
+function keyboard_(r) {
+  const b = (text, act) => ({ text, callback_data: r.id + '|' + act });
+  if (r.status === STATUS.NEW) return { inline_keyboard: [[b('✅ Взять в работу', 'take'), b('❌ Отклонить', 'rej')]] };
+  if (r.status === STATUS.WORK) {
+    const main = r.action === ACTION.ORDER ? b('📦 Выдано', 'issue') : b('📥 Принято на склад', 'accept');
+    return { inline_keyboard: [[main, b('❌ Отклонить', 'rej')]] };
+  }
+  return { inline_keyboard: [] };
+}
+
+function rejectKeyboard_(r) {
+  const rows = REJECT_REASONS.map((t, i) => [{ text: t, callback_data: r.id + '|rr|' + i }]);
+  rows.push([{ text: '« Назад', callback_data: r.id + '|back' }]);
+  return { inline_keyboard: rows };
+}
+
+function sendRequestMessage_(id) {
+  const r = getRequest_(id);
+  if (!r) return;
+  const text = buildRequestText_(r);
+  const sent = [];
+  notifyTargets_().forEach(chat => {
+    const j = tg_('sendMessage', { chat_id: chat, text, parse_mode: 'HTML',
+                                   reply_markup: keyboard_(r), disable_web_page_preview: true });
+    if (j && j.ok) sent.push({ c: chat, m: j.result.message_id });
+  });
+  updateRequest_(r.row, { 'TG': JSON.stringify(sent) });
+}
+
+function refreshRequestMessages_(id) {
+  const r = getRequest_(id);
+  if (!r) return;
+  let list = [];
+  try { list = JSON.parse(r.tg || '[]'); } catch (e) { list = []; }
+  const text = buildRequestText_(r);
+  list.forEach(x => tg_('editMessageText', { chat_id: x.c, message_id: x.m, text, parse_mode: 'HTML',
+                                             reply_markup: keyboard_(r), disable_web_page_preview: true }));
+}
+
+function alertLowStock_(names) {
+  const cache = CacheService.getScriptCache();
+  const catalog = getCatalog_();
+  const low = names.map(n => findItemByName_(catalog, n))
+    .filter(it => it && it.status === 'Докупить' && !cache.get('low_' + it.id));
+  if (!low.length) return;
+  low.forEach(it => cache.put('low_' + it.id, '1', 21600));
+  const text = '⚠️ <b>Пора докупить</b>\n' +
+    low.map(it => '• ' + esc_(it.name) + ': доступно ' + it.available + ', минимум ' + it.min).join('\n');
+  notifyTargets_().forEach(chat => tg_('sendMessage', { chat_id: chat, text, parse_mode: 'HTML' }));
+}
+
+// ---------- Webhook ----------
+
+function doPost(e) {
+  try {
+    const upd = JSON.parse(e.postData.contents);
+    // Telegram может прислать то же обновление повторно — отсекаем дубли
+    const cache = CacheService.getScriptCache();
+    if (upd.update_id) {
+      if (cache.get('u' + upd.update_id)) return ContentService.createTextOutput('ok');
+      cache.put('u' + upd.update_id, '1', 21600);
+    }
+    if (upd.callback_query) handleCallback_(upd.callback_query);
+    else if (upd.message) handleMessage_(upd.message);
+  } catch (err) {
+    console.error(err);
+  }
+  return ContentService.createTextOutput('ok');
+}
+
+function doGet() {
+  return ContentService.createTextOutput('Учёт ТМЦ: веб-приложение работает');
+}
+
+function handleMessage_(msg) {
+  const text = String(msg.text || '').trim();
+  const chatId = msg.chat.id;
+  if (/^\/chatid/.test(text)) {
+    tg_('sendMessage', { chat_id: chatId, text: 'chat_id этого чата: ' + chatId + '\nВставьте его в «Офис» → «chat_id общего чата».' });
+    return;
+  }
+  if (/^\/start/.test(text) && msg.chat.type === 'private') {
+    const u = String(msg.from.username || '').toLowerCase();
+    const sh = sheet_('RESP');
+    const { rows } = readRows_('RESP');
+    const iU = ci_('RESP', 'Telegram (@username)'), iC = ci_('RESP', 'Telegram chat_id');
+    const i = rows.findIndex(r => u && String(r[iU] || '').replace(/^@/, '').trim().toLowerCase() === u);
+    if (i >= 0) {
+      sh.getRange(i + 2, iC + 1).setValue(String(chatId));
+      tg_('sendMessage', { chat_id: chatId, text: 'Готово, уведомления о заявках подключены.' });
+    } else {
+      tg_('sendMessage', { chat_id: chatId,
+        text: 'Вас нет в списке ответственных. Попросите добавить ваш @username на лист «Ответственные», затем снова отправьте /start.\nВаш chat_id: ' + chatId });
+    }
+  }
+}
+
+function handleCallback_(cq) {
+  const answer = (text, alert) => tg_('answerCallbackQuery', { callback_query_id: cq.id, text, show_alert: !!alert });
+  if (!isAuthorized_(cq.from)) { answer('Нет прав на обработку заявок', true); return; }
+
+  const parts = String(cq.data || '').split('|');
+  const id = parts[0], act = parts[1], arg = parts[2];
+  const r = getRequest_(id);
+  if (!r) { answer('Заявка не найдена', true); return; }
+  const here = { chat_id: cq.message.chat.id, message_id: cq.message.message_id };
+
+  if (act === 'rej') {
+    tg_('editMessageReplyMarkup', Object.assign({ reply_markup: rejectKeyboard_(r) }, here));
+    answer('Выберите причину');
+    return;
+  }
+  if (act === 'back') {
+    tg_('editMessageReplyMarkup', Object.assign({ reply_markup: keyboard_(r) }, here));
+    answer('');
+    return;
+  }
+
+  let action = act, reason = '';
+  if (act === 'rr') { action = 'reject'; reason = REJECT_REASONS[Number(arg)] || 'Другое'; }
+  const res = processRequestAction_(id, action, displayName_(cq.from), reason);
+  answer(res.message, !res.ok);
+}
