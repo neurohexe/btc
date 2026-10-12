@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<style>
+  :root { --ink:#1d2733; --muted:#5b6876; --line:#d5dbe2; --accent:#245b7a; --bad:#a1322a; --ok:#2f6b3f; }
+  * { box-sizing:border-box; }
+  body { font:14px/1.45 Roboto, Arial, sans-serif; color:var(--ink); margin:0; padding:4px 2px; }
+  label.f { display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--muted); margin-bottom:12px; }
+  select, input[type=text], input[type=number] { font:inherit; color:var(--ink); padding:6px 8px; border:1px solid var(--line); border-radius:4px; width:100%; }
+  .two { display:flex; gap:12px; } .two > * { flex:1; }
+  .box { border-left:3px solid var(--line); padding-left:12px; margin-bottom:12px; }
+  .check { display:flex; gap:8px; align-items:center; color:var(--ink); font-size:14px; margin-bottom:12px; }
+  .stock { font-size:13px; color:var(--muted); margin:-6px 0 12px; }
+  button { font:inherit; padding:8px 16px; border-radius:4px; border:1px solid var(--accent); background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.5; }
+  button:focus-visible, select:focus-visible, input:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  #status { min-height:20px; margin-top:10px; font-size:13px; }
+  #status.err { color:var(--bad); } #status.ok { color:var(--ok); }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+  <label class="f">Операция
+    <select id="type">
+      <option value="in">Поступление на склад</option>
+      <option value="writeoff">Списание (сломано, утеряно)</option>
+      <option value="adjust">Корректировка после пересчёта</option>
+      <option value="install">Установка в офис со склада</option>
+    </select>
+  </label>
+
+  <label class="f">Позиция
+    <select id="item"></select>
+  </label>
+  <div class="stock" id="stockInfo"></div>
+
+  <div id="newBox" class="box hidden">
+    <label class="f">Название новой позиции <input type="text" id="newName"></label>
+    <label class="f">Категория <select id="newCat"></select></label>
+    <label class="check"><input type="checkbox" id="newEmp"> Выдаётся сотрудникам</label>
+    <label class="f hidden" id="audWrap">Кому выдаётся
+      <select id="newAud"><option>Офисный</option><option>Офисный + гибридный</option></select>
+    </label>
+  </div>
+
+  <div class="two">
+    <label class="f hidden" id="signWrap">Направление
+      <select id="sign"><option value="+">Найдено больше (+)</option><option value="-">Не хватает (−)</option></select>
+    </label>
+    <label class="f">Количество <input type="number" id="qty" min="1" value="1"></label>
+  </div>
+
+  <div id="installBox" class="hidden two">
+    <label class="f">Этаж <select id="floor"></select></label>
+    <label class="f">Помещение / зона <input type="text" id="room" placeholder="Например: переговорная 3.2"></label>
+  </div>
+
+  <label class="f">Комментарий <input type="text" id="comment"></label>
+
+  <button id="go" type="button">Провести</button>
+  <div id="status"></div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  let meta = null;
+  const NEW = '__new__';
+
+  function load() {
+    google.script.run.withSuccessHandler(m => {
+      meta = m;
+      const cur = $('item').value;
+      $('item').innerHTML = '';
+      m.items.forEach(i => { const o = document.createElement('option'); o.value = i.name; o.textContent = i.name; $('item').appendChild(o); });
+      const n = document.createElement('option'); n.value = NEW; n.textContent = '+ Новая позиция'; $('item').appendChild(n);
+      if (cur) $('item').value = cur;
+      $('newCat').innerHTML = '<option value=""></option>' + m.categories.map(c => '<option></option>').join('');
+      [...$('newCat').options].slice(1).forEach((o, i) => { o.textContent = m.categories[i]; o.value = m.categories[i]; });
+      $('floor').innerHTML = '';
+      for (let f = 1; f <= m.floors; f++) { const o = document.createElement('option'); o.textContent = f; $('floor').appendChild(o); }
+      update();
+    }).withFailureHandler(e => status(e.message, true)).getOperationMeta();
+  }
+
+  function update() {
+    const t = $('type').value, isNew = $('item').value === NEW;
+    $('newBox').classList.toggle('hidden', !isNew);
+    $('signWrap').classList.toggle('hidden', t !== 'adjust');
+    $('installBox').classList.toggle('hidden', t !== 'install');
+    $('audWrap').classList.toggle('hidden', !$('newEmp').checked);
+    const it = meta && meta.items.find(i => i.name === $('item').value);
+    $('stockInfo').textContent = it ? `На складе: ${it.stock}, доступно для выдачи: ${it.available}` : '';
+  }
+  ['type', 'item', 'newEmp'].forEach(id => $(id).addEventListener('change', update));
+
+  function status(t, err) { $('status').textContent = t; $('status').className = err ? 'err' : 'ok'; }
+
+  $('go').addEventListener('click', () => {
+    const isNew = $('item').value === NEW;
+    const o = {
+      type: $('type').value, item: isNew ? '' : $('item').value, qty: $('qty').value, sign: $('sign').value,
+      floor: $('floor').value, room: $('room').value.trim(), comment: $('comment').value.trim(),
+      newItem: isNew ? { name: $('newName').value.trim(), category: $('newCat').value,
+                         forEmployees: $('newEmp').checked, audience: $('newEmp').checked ? $('newAud').value : '' } : null
+    };
+    if (isNew && !o.newItem.name) { status('Введите название новой позиции', true); return; }
+    $('go').disabled = true; status('Провожу…');
+    google.script.run
+      .withSuccessHandler(msg => { $('go').disabled = false; status('Готово. ' + msg); $('newName').value = ''; $('comment').value = ''; load(); })
+      .withFailureHandler(e => { $('go').disabled = false; status(e.message, true); })
+      .manualOperation(o);
+  });
+
+  load();
+</script>
+</body>
+</html>
