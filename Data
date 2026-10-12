@@ -1,0 +1,304 @@
+/**
+ * Слой данных. Все чтения и записи таблицы — только через эти функции.
+ * При переезде на сайт с базой данных заменяется именно этот файл.
+ */
+
+// ---------- Базовые помощники ----------
+
+function ss_() {
+  const id = PropertiesService.getScriptProperties().getProperty('SS_ID');
+  return id ? SpreadsheetApp.openById(id) : SpreadsheetApp.getActiveSpreadsheet();
+}
+
+function getOrCreateSheet_(name) {
+  const ss = ss_();
+  return ss.getSheetByName(name) || ss.insertSheet(name);
+}
+
+function sheet_(key) {
+  const name = SHEETS[key];
+  const sh = ss_().getSheetByName(name);
+  if (!sh) throw new Error('Нет листа «' + name + '». Запустите «Первичная настройка».');
+  return sh;
+}
+
+/** Индекс колонки (с нуля) по названию. */
+function ci_(key, name) {
+  const i = HEADERS[key].indexOf(name);
+  if (i < 0) throw new Error('Нет колонки «' + name + '» в ' + key);
+  return i;
+}
+
+function colLetter_(key, name) {
+  return columnToLetter_(ci_(key, name) + 1);
+}
+
+function columnToLetter_(n) {
+  let s = '';
+  while (n > 0) {
+    const m = (n - 1) % 26;
+    s = String.fromCharCode(65 + m) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+function readRows_(key) {
+  const sh = sheet_(key);
+  const last = sh.getLastRow();
+  if (last < 2) return { sh, rows: [] };
+  return { sh, rows: sh.getRange(2, 1, last - 1, HEADERS[key].length).getValues() };
+}
+
+function normalize_(s) {
+  return String(s == null ? '' : s).trim().toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ');
+}
+
+function isYes_(v) {
+  return /^(да|yes|true|1|\+|выда)/i.test(String(v || '').trim());
+}
+
+function isNo_(v) {
+  return /^(нет|no|false|0|-)/i.test(String(v || '').trim());
+}
+
+function parseDate_(v) {
+  if (v instanceof Date) return v;
+  const s = String(v || '').trim();
+  if (!s) return new Date();
+  const m = s.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{2,4})/);
+  if (m) {
+    const y = m[3].length === 2 ? 2000 + Number(m[3]) : Number(m[3]);
+    return new Date(y, Number(m[2]) - 1, Number(m[1]));
+  }
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? new Date() : d;
+}
+
+// ---------- Настройки офиса ----------
+
+function findOfficeRow_(name) {
+  const sh = sheet_('OFFICE');
+  const vals = sh.getRange(1, 1, Math.max(sh.getLastRow(), 1), 1).getValues();
+  const i = vals.findIndex(r => r[0] === name);
+  return i < 0 ? 0 : i + 1;
+}
+
+function getSetting_(name) {
+  const row = findOfficeRow_(name);
+  return row ? sheet_('OFFICE').getRange(row, 2).getValue() : '';
+}
+
+function setSetting_(name, value) {
+  const row = findOfficeRow_(name);
+  if (row) sheet_('OFFICE').getRange(row, 2).setValue(value);
+  else sheet_('OFFICE').appendRow([name, value]);
+}
+
+function getFloorsCount_() {
+  return Math.max(1, Math.min(200, parseInt(getSetting_('Количество этажей'), 10) || 1));
+}
+
+// ---------- Категории ----------
+
+function getCategories_() {
+  return readRows_('CATEGORIES').rows.map(r => String(r[0]).trim()).filter(String);
+}
+
+function ensureCategory_(name, cache) {
+  const n = String(name || '').trim();
+  if (!n) return '';
+  const list = cache || getCategories_();
+  const found = list.find(c => normalize_(c) === normalize_(n));
+  if (found) return found;
+  sheet_('CATEGORIES').appendRow([n, '']);
+  list.push(n);
+  return n;
+}
+
+// ---------- Каталог (склад) ----------
+
+function getCatalog_() {
+  const { rows } = readRows_('CATALOG');
+  const g = (r, n) => r[ci_('CATALOG', n)];
+  return rows.map((r, i) => ({
+    row: i + 2,
+    id: String(g(r, 'ID')),
+    name: String(g(r, 'Позиция')).trim(),
+    category: g(r, 'Категория'),
+    forEmployees: isYes_(g(r, 'Выдаётся сотрудникам')),
+    audience: g(r, 'Кому выдаётся'),
+    min: Number(g(r, 'Мин. остаток')) || 0,
+    inStock: Number(g(r, 'На складе')) || 0,
+    reserved: Number(g(r, 'В работе')) || 0,
+    available: Number(g(r, 'Доступно')) || 0,
+    status: g(r, 'Статус')
+  })).filter(x => x.id && x.name);
+}
+
+function findItemByName_(catalog, name) {
+  const n = normalize_(name);
+  return catalog.find(i => normalize_(i.name) === n) || null;
+}
+
+/**
+ * Пакетное добавление позиций в каталог.
+ * const w = catalogWriter_(); w.ensure({name, ...}); ... w.flush();
+ */
+function catalogWriter_() {
+  const catalog = getCatalog_();
+  let max = 0;
+  catalog.forEach(i => { const m = i.id.match(/^P(\d+)$/); if (m) max = Math.max(max, Number(m[1])); });
+  const pending = [];
+  const width = HEADERS.CATALOG.length;
+  return {
+    catalog,
+    ensure(d) {
+      const found = findItemByName_(catalog, d.name);
+      if (found) return found;
+      max += 1;
+      const id = 'P' + String(max).padStart(4, '0');
+      const row = new Array(width).fill('');
+      row[ci_('CATALOG', 'ID')] = id;
+      row[ci_('CATALOG', 'Позиция')] = String(d.name).trim();
+      row[ci_('CATALOG', 'Категория')] = d.category || '';
+      row[ci_('CATALOG', 'Выдаётся сотрудникам')] = d.forEmployees ? 'да' : 'нет';
+      row[ci_('CATALOG', 'Кому выдаётся')] = d.forEmployees ? (d.audience || AUDIENCE.OFFICE) : '';
+      row[ci_('CATALOG', 'Мин. остаток')] = Number(d.min) || 0;
+      pending.push(row);
+      const item = { row: 0, id, name: String(d.name).trim(), category: d.category || '', forEmployees: !!d.forEmployees,
+                     audience: row[ci_('CATALOG', 'Кому выдаётся')], min: Number(d.min) || 0,
+                     inStock: 0, reserved: 0, available: 0, isNew: true };
+      catalog.push(item);
+      return item;
+    },
+    flush() {
+      if (!pending.length) return;
+      const sh = sheet_('CATALOG');
+      sh.getRange(sh.getLastRow() + 1, 1, pending.length, width).setValues(pending);
+      pending.length = 0;
+    }
+  };
+}
+
+function updateCatalogField_(item, field, value) {
+  if (!item.row) return;
+  sheet_('CATALOG').getRange(item.row, ci_('CATALOG', field) + 1).setValue(value);
+}
+
+// ---------- Журнал ----------
+
+/** entries: [{op, id, name, qty, from, to, login, floor, desk, req, by, comment, date}] */
+function appendJournal_(entries) {
+  if (!entries.length) return;
+  const sh = sheet_('JOURNAL');
+  const rows = entries.map(e => [
+    e.date || new Date(), e.op, e.id, e.name, e.qty, e.from, e.to,
+    e.login || '', e.floor || '', e.desk || '', e.req || '', e.by || '', e.comment || ''
+  ]);
+  sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+}
+
+// ---------- Пересчёт остатков ----------
+
+/** Сколько единиц каждой позиции взято в работу по заявкам на выдачу. */
+function reservedByName_() {
+  const res = {};
+  const iSt = ci_('REQUESTS', 'Статус'), iAct = ci_('REQUESTS', 'Действие'), iIt = ci_('REQUESTS', 'Позиции');
+  readRows_('REQUESTS').rows.forEach(r => {
+    if (r[iSt] !== STATUS.WORK || r[iAct] !== ACTION.ORDER) return;
+    String(r[iIt] || '').split('\n').filter(String).forEach(n => {
+      const k = normalize_(n);
+      res[k] = (res[k] || 0) + 1;
+    });
+  });
+  return res;
+}
+
+/** Все остатки считаются из журнала. Ручной ввод в расчётные колонки не нужен. */
+function recalcStock_() {
+  const { sh, rows } = readRows_('CATALOG');
+  if (!rows.length) return;
+  const J = readRows_('JOURNAL').rows;
+  const iId = ci_('JOURNAL', 'ID позиции'), iOp = ci_('JOURNAL', 'Операция'), iQ = ci_('JOURNAL', 'Кол-во');
+  const iFrom = ci_('JOURNAL', 'Откуда'), iTo = ci_('JOURNAL', 'Куда');
+  const agg = {};
+  J.forEach(r => {
+    const id = String(r[iId] || '');
+    if (!id) return;
+    const q = Number(r[iQ]) || 0;
+    const a = agg[id] || (agg[id] = { in: 0, issued: 0, ret: 0, off: 0, inst: 0, stock: 0 });
+    const op = r[iOp];
+    if (op === OPS.IN || op === OPS.INIT) a.in += q;
+    if (op === OPS.ISSUE) a.issued += q;
+    if (op === OPS.RETURN) a.ret += q;
+    if (op === OPS.WRITEOFF) a.off += q;
+    if (op === OPS.INSTALL) a.inst += q;
+    if (r[iTo] === PLACE.STOCK) a.stock += q;
+    if (r[iFrom] === PLACE.STOCK) a.stock -= q;
+  });
+  const reserved = reservedByName_();
+  const iCatId = ci_('CATALOG', 'ID'), iName = ci_('CATALOG', 'Позиция'), iMin = ci_('CATALOG', 'Мин. остаток');
+  const out = rows.map(r => {
+    const a = agg[String(r[iCatId])] || { in: 0, issued: 0, ret: 0, off: 0, inst: 0, stock: 0 };
+    if (!r[iName]) return ['', '', '', '', '', '', '', '', ''];
+    const res = reserved[normalize_(r[iName])] || 0;
+    const avail = a.stock - res;
+    const min = Number(r[iMin]) || 0;
+    const status = (min > 0 && avail < min) ? 'Докупить' : (avail <= 0 ? 'Нет в наличии' : 'ОК');
+    return [a.in, a.issued, a.ret, a.off, a.inst, a.stock, res, avail, status];
+  });
+  sh.getRange(2, ci_('CATALOG', 'Поступило') + 1, out.length, out[0].length).setValues(out);
+  SpreadsheetApp.flush();
+}
+
+// ---------- Выдано сотрудникам ----------
+
+function getIssuedForLogin_(login) {
+  const L = normalize_(login);
+  return readRows_('ISSUED').rows.map((r, i) => ({
+    row: i + 2,
+    login: r[ci_('ISSUED', 'Логин')],
+    format: r[ci_('ISSUED', 'Формат работы')],
+    item: r[ci_('ISSUED', 'Позиция')],
+    status: r[ci_('ISSUED', 'Статус')]
+  })).filter(x => normalize_(x.login) === L && x.status === ISSUED_STATUS.ACTIVE);
+}
+
+/** list: [{login, floor, desk, format, item, date, req}] */
+function addIssued_(list) {
+  if (!list.length) return;
+  const sh = sheet_('ISSUED');
+  const rows = list.map(x => [x.login, x.floor || '', x.desk || '', x.format || '', x.item,
+                              x.date || new Date(), x.req || '', ISSUED_STATUS.ACTIVE, '']);
+  sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+}
+
+function markReturned_(login, items, date) {
+  const issued = getIssuedForLogin_(login);
+  const sh = sheet_('ISSUED');
+  const col = ci_('ISSUED', 'Статус') + 1;
+  items.forEach(n => {
+    const x = issued.find(i => !i.done && normalize_(i.item) === normalize_(n));
+    if (!x) return;
+    x.done = true;
+    sh.getRange(x.row, col, 1, 2).setValues([[ISSUED_STATUS.RETURNED, date || new Date()]]);
+  });
+}
+
+// ---------- Мебель по местам ----------
+
+/** Добавить количество (mode='add') или задать его (mode='set') для этаж+помещение+позиция. */
+function upsertFurniture_(floor, room, item, qty, mode, comment) {
+  const { sh, rows } = readRows_('FURNITURE');
+  const iF = ci_('FURNITURE', 'Этаж'), iR = ci_('FURNITURE', 'Помещение / зона');
+  const iI = ci_('FURNITURE', 'Позиция'), iQ = ci_('FURNITURE', 'Количество');
+  const idx = rows.findIndex(r => String(r[iF]) === String(floor) &&
+    normalize_(r[iR]) === normalize_(room) && normalize_(r[iI]) === normalize_(item));
+  if (idx >= 0) {
+    const cur = Number(rows[idx][iQ]) || 0;
+    sh.getRange(idx + 2, iQ + 1).setValue(mode === 'set' ? qty : cur + qty);
+  } else {
+    sh.appendRow([floor, room || '', item, qty, comment || '']);
+  }
+}
