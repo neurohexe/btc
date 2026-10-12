@@ -1,0 +1,209 @@
+/**
+ * Заявки: создание, автопроверки, смена статусов.
+ * Одна функция processRequestAction_ обслуживает и кнопки Telegram, и колонку «Действие ▼» в таблице.
+ */
+
+function createRequest_(req) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  let id;
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const seq = Number(props.getProperty('REQ_SEQ') || 0) + 1;
+    props.setProperty('REQ_SEQ', String(seq));
+    id = REQ_PREFIX + String(seq).padStart(4, '0');
+
+    const checks = runChecks_(req, id);
+    const row = new Array(HEADERS.REQUESTS.length).fill('');
+    const set = (n, v) => { row[ci_('REQUESTS', n)] = v; };
+    set('№', id);
+    set('Дата', req.date || new Date());
+    set('Логин', req.login);
+    set('Этаж', req.floor);
+    set('Стол', req.desk);
+    set('Действие', req.action);
+    set('Формат работы', req.format);
+    set('Позиции', req.items.join('\n'));
+    set('Причина сдачи', req.reason);
+    set('Новый формат', req.newFormat);
+    set('Проверки', checks.join('\n'));
+    set('Статус', STATUS.NEW);
+    set('TG', '[]');
+    const sh = sheet_('REQUESTS');
+    sh.getRange(sh.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+  } finally {
+    lock.releaseLock();
+  }
+  sendRequestMessage_(id);
+  return id;
+}
+
+/** Автопроверки заявки. Ничего не блокируют, а подсказывают ответственному. */
+function runChecks_(req, selfId) {
+  const flags = [];
+  const catalog = getCatalog_();
+  const issued = getIssuedForLogin_(req.login);
+  const issuedSet = new Set(issued.map(x => normalize_(x.item)));
+  const reqSet = new Set(req.items.map(normalize_));
+
+  if (req.action === ACTION.ORDER) {
+    req.items.forEach(n => {
+      const it = findItemByName_(catalog, n);
+      if (!it) flags.push(`⚠️ ${n}: нет в каталоге`);
+      else {
+        if (it.available <= 0) flags.push(`❌ ${n}: нет в наличии (на складе ${it.inStock}, в работе ${it.reserved})`);
+        if (req.format === FORMAT.HYBRID && it.audience !== AUDIENCE.BOTH) flags.push(`⛔ ${n}: не положено для гибридного формата`);
+      }
+      if (issuedSet.has(normalize_(n))) flags.push(`🔁 ${n}: уже выдано ранее`);
+    });
+  } else {
+    req.items.forEach(n => {
+      if (!issuedSet.has(normalize_(n))) flags.push(`❓ ${n}: не числится за сотрудником`);
+    });
+    if (req.reason === 'Увольнение' || (req.reason === 'Смена формата работы' && req.newFormat === FORMAT.REMOTE)) {
+      const rest = issued.filter(x => !reqSet.has(normalize_(x.item))).map(x => x.item);
+      if (rest.length) flags.push(`📋 Ещё числится за сотрудником: ${rest.join(', ')}`);
+    }
+  }
+
+  // Формат в заявке отличается от того, с которым ранее выдавали
+  const known = issued.find(x => x.format);
+  const claimed = req.action === ACTION.ORDER ? req.format : req.newFormat;
+  if (known && claimed && known.format !== claimed) flags.push(`🔄 Формат: ранее ${known.format}, в заявке ${claimed}`);
+
+  // Уже есть открытая заявка на ту же позицию
+  const iL = ci_('REQUESTS', 'Логин'), iSt = ci_('REQUESTS', 'Статус'), iIt = ci_('REQUESTS', 'Позиции');
+  const iId = ci_('REQUESTS', '№'), iAct = ci_('REQUESTS', 'Действие');
+  readRows_('REQUESTS').rows.forEach(r => {
+    if (r[iId] === selfId || normalize_(r[iL]) !== normalize_(req.login)) return;
+    if (r[iSt] !== STATUS.NEW && r[iSt] !== STATUS.WORK) return;
+    if (r[iAct] !== req.action) return;
+    const same = String(r[iIt]).split('\n').filter(n => reqSet.has(normalize_(n)));
+    if (same.length) flags.push(`📎 Уже есть открытая заявка ${r[iId]}: ${same.join(', ')}`);
+  });
+
+  return flags;
+}
+
+function getRequest_(id) {
+  const { rows } = readRows_('REQUESTS');
+  const i = rows.findIndex(r => String(r[ci_('REQUESTS', '№')]) === String(id));
+  if (i < 0) return null;
+  const r = rows[i];
+  const g = n => r[ci_('REQUESTS', n)];
+  return {
+    row: i + 2, id: String(g('№')), date: g('Дата'), login: g('Логин'), floor: g('Этаж'), desk: g('Стол'),
+    action: g('Действие'), format: g('Формат работы'),
+    items: String(g('Позиции') || '').split('\n').map(s => s.trim()).filter(String),
+    reason: g('Причина сдачи'), newFormat: g('Новый формат'), checks: g('Проверки'), status: g('Статус'),
+    by: g('Ответственный'), rejectReason: g('Причина отклонения'), tg: g('TG')
+  };
+}
+
+function updateRequest_(row, fields) {
+  const sh = sheet_('REQUESTS');
+  Object.keys(fields).forEach(k => sh.getRange(row, ci_('REQUESTS', k) + 1).setValue(fields[k]));
+}
+
+/**
+ * action: take | reject | issue | accept
+ * Возвращает {ok, message}.
+ */
+function processRequestAction_(id, action, by, reason) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  let result;
+  try {
+    result = applyAction_(id, action, by, reason);
+  } finally {
+    lock.releaseLock();
+  }
+  if (result.ok) {
+    try { refreshRequestMessages_(id); } catch (e) { console.warn(e); }
+    try { syncFormCatalog_(); } catch (e) { console.warn(e); }
+    if (action === 'issue') {
+      const r = getRequest_(id);
+      try { alertLowStock_(r ? r.items : []); } catch (e) { console.warn(e); }
+    }
+  }
+  return result;
+}
+
+function applyAction_(id, action, by, reason) {
+  const r = getRequest_(id);
+  if (!r) return { ok: false, message: 'Заявка ' + id + ' не найдена' };
+  const now = new Date();
+  const fail = m => ({ ok: false, message: m });
+
+  if (action === 'take') {
+    if (r.status !== STATUS.NEW) return fail('Заявка уже в статусе «' + r.status + '»');
+    updateRequest_(r.row, { 'Статус': STATUS.WORK, 'Ответственный': by, 'Взята в работу': now });
+    recalcStock_();
+    return { ok: true, message: id + ' взята в работу' };
+  }
+
+  if (action === 'reject') {
+    if (r.status !== STATUS.NEW && r.status !== STATUS.WORK) return fail('Заявка уже закрыта: «' + r.status + '»');
+    updateRequest_(r.row, { 'Статус': STATUS.REJECTED, 'Ответственный': by, 'Закрыта': now,
+                            'Причина отклонения': reason || 'Без причины' });
+    recalcStock_();
+    return { ok: true, message: id + ' отклонена' };
+  }
+
+  if (action === 'issue') {
+    if (r.action !== ACTION.ORDER) return fail('Это заявка на сдачу — используйте «Принято на склад»');
+    if (r.status !== STATUS.WORK) return fail('Сначала возьмите заявку в работу (сейчас «' + r.status + '»)');
+    const catalog = getCatalog_();
+    const missing = r.items.filter(n => { const it = findItemByName_(catalog, n); return !it || it.inStock < 1; });
+    if (missing.length) return fail('На складе нет: ' + missing.join(', ') + '. Оформите поступление или отклоните заявку.');
+    const fmt = r.format;
+    appendJournal_(r.items.map(n => {
+      const it = findItemByName_(catalog, n);
+      return { op: OPS.ISSUE, id: it.id, name: it.name, qty: 1, from: PLACE.STOCK, to: PLACE.EMPLOYEE,
+               login: r.login, floor: r.floor, desk: r.desk, req: id, by };
+    }));
+    addIssued_(r.items.map(n => ({ login: r.login, floor: r.floor, desk: r.desk, format: fmt,
+                                   item: findItemByName_(catalog, n).name, date: now, req: id })));
+    updateRequest_(r.row, { 'Статус': STATUS.ISSUED, 'Ответственный': by, 'Закрыта': now });
+    recalcStock_();
+    return { ok: true, message: id + ': выдано, остатки обновлены' };
+  }
+
+  if (action === 'accept') {
+    if (r.action !== ACTION.RETURN) return fail('Это заявка на выдачу — используйте «Выдано»');
+    if (r.status !== STATUS.WORK) return fail('Сначала возьмите заявку в работу (сейчас «' + r.status + '»)');
+    const w = catalogWriter_();
+    const entries = r.items.map(n => {
+      const it = w.ensure({ name: n, forEmployees: true });
+      return { op: OPS.RETURN, id: it.id, name: it.name, qty: 1, from: PLACE.EMPLOYEE, to: PLACE.STOCK,
+               login: r.login, floor: r.floor, desk: r.desk, req: id, by,
+               comment: r.reason + (r.newFormat ? ' → ' + r.newFormat : '') };
+    });
+    w.flush();
+    appendJournal_(entries);
+    markReturned_(r.login, r.items, now);
+    updateRequest_(r.row, { 'Статус': STATUS.RETURNED, 'Ответственный': by, 'Закрыта': now });
+    recalcStock_();
+    return { ok: true, message: id + ': принято на склад, остатки обновлены' };
+  }
+
+  return fail('Неизвестное действие');
+}
+
+/** Установленный триггер «при изменении»: колонка «Действие ▼» на листе «Заявки». */
+function handleSheetEdit(e) {
+  if (!e || !e.range) return;
+  const sh = e.range.getSheet();
+  if (sh.getName() !== SHEETS.REQUESTS) return;
+  if (e.range.getColumn() !== ci_('REQUESTS', 'Действие ▼') + 1 || e.range.getNumRows() !== 1) return;
+  const value = e.range.getValue();
+  const action = SHEET_ACTIONS[value];
+  if (!action) return;
+  const row = e.range.getRow();
+  const id = sh.getRange(row, ci_('REQUESTS', '№') + 1).getValue();
+  const reason = sh.getRange(row, ci_('REQUESTS', 'Причина отклонения') + 1).getValue() || 'Отклонено в таблице';
+  const by = (e.user && e.user.getEmail && e.user.getEmail()) || Session.getActiveUser().getEmail() || 'таблица';
+  const res = processRequestAction_(id, action, by, reason);
+  e.range.clearContent();
+  ss_().toast(res.message, res.ok ? 'Готово' : 'Не выполнено', 6);
+}
