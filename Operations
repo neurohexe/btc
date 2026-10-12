@@ -1,0 +1,93 @@
+/**
+ * Ручные операции со складом (поступление, списание, корректировка, установка в офис)
+ * и создание категорий.
+ */
+
+function showOperationDialog() {
+  const html = HtmlService.createHtmlOutputFromFile('OperationDialog').setWidth(460).setHeight(560);
+  SpreadsheetApp.getUi().showModalDialog(html, 'Операция со складом');
+}
+
+function getOperationMeta() {
+  return {
+    items: getCatalog_().map(i => ({ name: i.name, stock: i.inStock, available: i.available })),
+    categories: getCategories_(),
+    floors: getFloorsCount_()
+  };
+}
+
+/**
+ * o: {type, item, newItem:{name, category, forEmployees, audience}, qty, sign, floor, room, comment}
+ * type: in | writeoff | adjust | install
+ */
+function manualOperation(o) {
+  const qty = Math.floor(Number(o.qty));
+  if (!(qty > 0)) throw new Error('Укажите количество больше нуля');
+  const by = Session.getActiveUser().getEmail() || 'таблица';
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  let msg, itemName;
+  try {
+    recalcStock_();
+    const w = catalogWriter_();
+    let it;
+    if (o.newItem && o.newItem.name) {
+      if (findItemByName_(w.catalog, o.newItem.name)) throw new Error('Такая позиция уже есть — выберите её из списка');
+      const category = o.newItem.category ? ensureCategory_(o.newItem.category) : '';
+      it = w.ensure({ name: o.newItem.name, category, forEmployees: !!o.newItem.forEmployees, audience: o.newItem.audience });
+      w.flush();
+    } else {
+      it = findItemByName_(w.catalog, o.item);
+      if (!it) throw new Error('Выберите позицию');
+    }
+    itemName = it.name;
+    const base = { id: it.id, name: it.name, qty, by, comment: o.comment || '' };
+    const needStock = () => {
+      if (it.inStock < qty) throw new Error(`На складе только ${it.inStock} шт. позиции «${it.name}»`);
+    };
+
+    if (o.type === 'in') {
+      appendJournal_([Object.assign({ op: OPS.IN, from: PLACE.SUPPLIER, to: PLACE.STOCK }, base)]);
+      msg = `Поступление: ${it.name}, +${qty} шт.`;
+    } else if (o.type === 'writeoff') {
+      needStock();
+      appendJournal_([Object.assign({ op: OPS.WRITEOFF, from: PLACE.STOCK, to: PLACE.WRITEOFF }, base)]);
+      msg = `Списано: ${it.name}, ${qty} шт.`;
+    } else if (o.type === 'adjust') {
+      if (o.sign === '-') {
+        needStock();
+        appendJournal_([Object.assign({ op: OPS.ADJ, from: PLACE.STOCK, to: PLACE.INVENTORY }, base)]);
+      } else {
+        appendJournal_([Object.assign({ op: OPS.ADJ, from: PLACE.INVENTORY, to: PLACE.STOCK }, base)]);
+      }
+      msg = `Корректировка: ${it.name}, ${o.sign === '-' ? '−' : '+'}${qty} шт.`;
+    } else if (o.type === 'install') {
+      if (!o.floor) throw new Error('Укажите этаж');
+      needStock();
+      appendJournal_([Object.assign({ op: OPS.INSTALL, from: PLACE.STOCK, to: PLACE.OFFICE, floor: o.floor,
+                                      comment: [o.room, o.comment].filter(Boolean).join('; ') }, base)]);
+      upsertFurniture_(o.floor, o.room || '', it.name, qty, 'add', '');
+      msg = `Установлено: ${it.name}, ${qty} шт. → этаж ${o.floor}${o.room ? ', ' + o.room : ''}`;
+    } else {
+      throw new Error('Неизвестная операция');
+    }
+    recalcStock_();
+  } finally {
+    lock.releaseLock();
+  }
+  try { syncFormCatalog_(); } catch (e) { console.warn(e); }
+  try { if (o.type !== 'in') alertLowStock_([itemName]); } catch (e) { console.warn(e); }
+  return msg;
+}
+
+function promptAddCategory() {
+  const ui = SpreadsheetApp.getUi();
+  const r = ui.prompt('Новая категория', 'Название категории:', ui.ButtonSet.OK_CANCEL);
+  if (r.getSelectedButton() !== ui.Button.OK) return;
+  const name = r.getResponseText().trim();
+  if (!name) return;
+  const before = getCategories_();
+  const exists = before.some(c => normalize_(c) === normalize_(name));
+  ensureCategory_(name, before);
+  ss_().toast(exists ? 'Такая категория уже есть' : 'Категория «' + name + '» добавлена');
+}
