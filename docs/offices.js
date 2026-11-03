@@ -11,6 +11,6 @@ window.OFFICES = [
   {
     id: 'almaty',
     name: 'Большой Алматинский Офис',
-    api: 'https://script.google.com/macros/s/ВСТАВЬТЕ_СЮДА_ID_РАЗВЁРТЫВАНИЯ/exec'
+    api: 'https://script.google.com/macros/s/https://script.google.com/macros/s/AKfycbwzkecuP03wwLJaPxF-np3cehQwEF4zs7FmMeBuXMUJ5Xg1RHiXIurEdx-LTC1bPmqR/exec/exec'
   }
 ];
