@@ -32,6 +32,8 @@
   .honey { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
   .submit { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding-left: 44px; }
   .err { color: var(--bad); font-size: 14px; }
+  .queue { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 14px; border-left: 4px solid var(--tag); }
+  .queue b { display: block; margin-bottom: 2px; }
 
   /* Готово: номер заявки на бирке — главный момент страницы */
   .done { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 28px 22px; }
@@ -55,6 +57,10 @@
     <h1>Заявка на мебель и аксессуары</h1>
     <p class="office" id="officeName"></p>
   </header>
+
+  <div id="queue" class="note warn queue hidden" role="note">
+    <div><b>Пожалуйста, обрати внимание</b><span id="queueText"></span></div>
+  </div>
 
   <div id="loading" class="note">Загружаю список позиций…</div>
   <div id="fatal" class="note bad hidden"></div>
@@ -144,7 +150,7 @@
   <div id="done" class="done hidden">
     <span class="tag" id="doneId"></span>
     <h2>Заявка отправлена</h2>
-    <p class="muted">Ответственный в офисе получил уведомление и свяжется с вами, когда всё будет готово.</p>
+    <p class="muted" id="doneText">Ответственный в офисе получил уведомление и свяжется с вами, когда всё будет готово.</p>
     <ul id="doneItems"></ul>
     <button class="btn ghost" type="button" id="again">Отправить ещё одну</button>
   </div>

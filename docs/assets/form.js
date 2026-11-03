@@ -34,6 +34,11 @@
     } catch (e) { fail(e.message); return; }
     $('loading').classList.add('hidden');
     if (meta.office) $('officeName').textContent = meta.office;
+    // 1 и 3 квартал — сбор заявок в очередь, выдача со следующего квартала
+    const q = meta.queue || {};
+    $('queueText').textContent = q.active
+      ? 'В данный период можно только сделать заявку на очередь. Выдача начнётся не раньше ' + q.from + '.' : '';
+    $('queue').classList.toggle('hidden', !q.active);
     build();
     $('form').classList.remove('hidden');
   }
@@ -98,6 +103,10 @@
     try {
       const res = await call(officeId, 'submitRequest', { request: req });
       $('doneId').textContent = res.id;
+      const q = meta.queue || {};
+      $('doneText').textContent = act === 'Заказать' && q.active
+        ? 'Заявка поставлена в очередь. Выдача начнётся не раньше ' + q.from + ' — ответственный свяжется с вами.'
+        : 'Ответственный в офисе получил уведомление и свяжется с вами, когда всё будет готово.';
       $('doneItems').replaceChildren(...items.map(n => el('li', { text: n })));
       $('form').classList.add('hidden');
       $('done').classList.remove('hidden');
