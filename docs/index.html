@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Учёт ТМЦ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/admin.css">
+</head>
+<body>
+
+<!-- Вход -->
+<div id="loginView" class="login hidden">
+  <form id="loginForm" class="login-card">
+    <span class="tag brand">ТМЦ</span>
+    <h1>Учёт ТМЦ</h1>
+    <p class="muted">Вход для ответственных за офис</p>
+    <label class="field" id="loginOfficeWrap"><span>Офис</span><select id="loginOffice"></select></label>
+    <label class="field"><span>Ваше имя</span><input type="text" id="loginName" autocomplete="name" placeholder="Так вас увидят в журнале операций"></label>
+    <label class="field"><span>Пароль офиса</span><input type="password" id="loginPass" autocomplete="current-password"></label>
+    <button class="btn" type="submit" id="loginBtn">Войти</button>
+    <p class="err" id="loginErr" role="alert"></p>
+  </form>
+</div>
+
+<!-- Рабочее место -->
+<div id="appView" class="app hidden">
+  <header class="bar">
+    <span class="tag brand">ТМЦ</span>
+    <div class="bar-office">
+      <strong id="barOffice"></strong>
+      <button class="link" type="button" id="switchOffice">Другой офис</button>
+    </div>
+    <div class="bar-user"><span id="barUser" class="muted"></span><button class="btn ghost small" type="button" id="logout">Выйти</button></div>
+  </header>
+
+  <nav class="tabs" id="tabs" aria-label="Разделы">
+    <button type="button" data-view="overview">Сводка</button>
+    <button type="button" data-view="requests">Заявки <span class="count" id="openCount"></span></button>
+    <button type="button" data-view="stock">Склад</button>
+    <button type="button" data-view="issued">Выдано</button>
+    <button type="button" data-view="furniture">Мебель по местам</button>
+    <button type="button" data-view="journal">Журнал</button>
+    <button type="button" data-view="import">Загрузка из файла</button>
+  </nav>
+
+  <main id="main"></main>
+</div>
+
+<!-- Операция со складом -->
+<dialog id="opDialog" class="sheet">
+  <form id="opForm" method="dialog">
+    <header class="sheet-head"><h2>Операция со складом</h2><button class="link" type="button" data-close>Закрыть</button></header>
+    <div class="sheet-body">
+      <div class="choices" id="opType">
+        <label class="choice"><input type="radio" name="opType" value="in" checked><span>Поступление</span></label>
+        <label class="choice"><input type="radio" name="opType" value="install"><span>Установка в офис</span></label>
+        <label class="choice"><input type="radio" name="opType" value="writeoff"><span>Списание</span></label>
+        <label class="choice"><input type="radio" name="opType" value="adjust"><span>Корректировка</span></label>
+      </div>
+      <p class="muted small" id="opHint"></p>
+      <label class="field"><span>Позиция</span><select id="opItem"></select></label>
+      <p class="small muted" id="opStock"></p>
+      <div id="opNew" class="op-new hidden">
+        <label class="field"><span>Название новой позиции</span><input type="text" id="opNewName"></label>
+        <label class="field"><span>Категория</span><input type="text" id="opNewCat" list="opCats" placeholder="Выберите или впишите новую"></label>
+        <datalist id="opCats"></datalist>
+        <label class="check"><input type="checkbox" id="opNewEmp"><span>Выдаётся сотрудникам</span></label>
+        <label class="field hidden" id="opNewAudWrap"><span>Кому выдаётся</span><select id="opNewAud"></select></label>
+      </div>
+      <div class="grid2">
+        <label class="field hidden" id="opSignWrap"><span>Что показал пересчёт</span>
+          <select id="opSign"><option value="+">Найдено больше (+)</option><option value="-">Не хватает (−)</option></select>
+        </label>
+        <label class="field"><span>Количество, шт.</span><input type="number" id="opQty" min="1" value="1"></label>
+      </div>
+      <div class="grid2 hidden" id="opPlace">
+        <label class="field"><span>Этаж</span><select id="opFloor"></select></label>
+        <label class="field"><span>Помещение / зона</span><input type="text" id="opRoom" placeholder="например, лаунж у кухни"></label>
+      </div>
+      <label class="field"><span>Комментарий</span><input type="text" id="opComment"></label>
+      <p class="err" id="opErr" role="alert"></p>
+    </div>
+    <footer class="sheet-foot"><button class="btn" type="submit" id="opSend">Провести</button></footer>
+  </form>
+</dialog>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" defer></script>
+<script src="offices.js"></script>
+<script src="assets/api.js"></script>
+<script src="assets/admin.js"></script>
+<script src="assets/import.js"></script>
+</body>
+</html>

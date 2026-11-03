@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Заявка на выдачу ТМЦ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .wrap { max-width: 680px; margin: 0 auto; padding: 28px 16px 64px; }
+  header.top { margin-bottom: 22px; }
+  header.top h1 { margin-top: 4px; }
+  header.top .office { color: var(--muted); font-size: 15px; }
+
+  form { display: flex; flex-direction: column; gap: 14px; }
+  .step {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px 18px 20px; display: grid; grid-template-columns: 30px 1fr; column-gap: 14px;
+  }
+  .step > .n {
+    width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--line-strong);
+    display: grid; place-items: center; font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums;
+  }
+  .step > .body { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .step h2 { font-size: 17px; padding-top: 2px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .q { display: flex; flex-direction: column; gap: 8px; }
+  .q > .label { font-weight: 500; font-size: 14px; }
+  .q > .help { color: var(--muted); font-size: 13px; margin-top: -4px; }
+  .honey { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+  .submit { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding-left: 44px; }
+  .err { color: var(--bad); font-size: 14px; }
+
+  /* Готово: номер заявки на бирке — главный момент страницы */
+  .done { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 28px 22px; }
+  .done .tag { font-size: 28px; padding: 6px 18px 6px 30px; clip-path: polygon(14px 0, 100% 0, 100% 100%, 14px 100%, 0 50%); }
+  .done .tag::before { left: 15px; width: 8px; height: 8px; margin-top: -4px; }
+  .done h2 { margin: 18px 0 8px; }
+  .done ul { margin: 12px 0 20px; padding-left: 20px; }
+
+  @media (max-width: 560px) {
+    .row { grid-template-columns: 1fr; }
+    .step { grid-template-columns: 1fr; padding: 16px; }
+    .step > .n { margin-bottom: 8px; }
+    .submit { padding-left: 0; }
+    .submit .btn { width: 100%; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>Заявка на мебель и аксессуары</h1>
+    <p class="office" id="officeName"></p>
+  </header>
+
+  <div id="loading" class="note">Загружаю список позиций…</div>
+  <div id="fatal" class="note bad hidden"></div>
+
+  <form id="form" class="hidden" novalidate>
+    <div class="honey" aria-hidden="true"><label>Сайт <input type="text" name="website" tabindex="-1" autocomplete="off"></label></div>
+
+    <section class="step" id="stepOffice">
+      <div class="n">1</div>
+      <div class="body">
+        <h2>Офис</h2>
+        <label class="field"><span>Где вы работаете</span><select id="office" required></select></label>
+      </div>
+    </section>
+
+    <section class="step">
+      <div class="n" data-n></div>
+      <div class="body">
+        <h2>Кто вы</h2>
+        <label class="field"><span>Рабочий логин</span>
+          <input type="text" id="login" autocomplete="username" placeholder="например, ivanova" required>
+        </label>
+        <div class="q">
+          <div class="label">Вы</div>
+          <div class="choices" id="category"></div>
+        </div>
+        <div id="blocked" class="note warn hidden">Для консультантов и сотрудников КПБ выдача через форму не предусмотрена. По вопросам обратитесь к ответственному в офисе.</div>
+      </div>
+    </section>
+
+    <section class="step staff-only">
+      <div class="n" data-n></div>
+      <div class="body">
+        <h2>Где вы сидите</h2>
+        <div class="row">
+          <label class="field"><span>Этаж</span><select id="floor" required></select></label>
+          <label class="field"><span>Номер стола</span><input type="text" id="desk" maxlength="10" placeholder="например, 12 или 12А" required></label>
+        </div>
+      </div>
+    </section>
+
+    <section class="step staff-only">
+      <div class="n" data-n></div>
+      <div class="body">
+        <h2>Что хотите сделать</h2>
+        <div class="choices" id="action">
+          <label class="choice"><input type="radio" name="action" value="Заказать"><span>Заказать</span></label>
+          <label class="choice"><input type="radio" name="action" value="Сдать"><span>Сдать</span></label>
+        </div>
+
+        <div id="orderBox" class="hidden" style="display:flex;flex-direction:column;gap:14px">
+          <div class="q">
+            <div class="label">Формат работы</div>
+            <div class="choices" id="format"></div>
+          </div>
+          <div id="remote" class="note warn hidden">Для удалённого формата выдача не предусмотрена. Если нужно сдать вещи — выберите «Сдать».</div>
+          <div class="q hidden" id="orderItemsQ">
+            <div class="label">Что нужно</div>
+            <div class="help">Каждая позиция — 1 шт. на сотрудника.</div>
+            <div class="checks" id="orderItems"></div>
+          </div>
+        </div>
+
+        <div id="returnBox" class="hidden" style="display:flex;flex-direction:column;gap:14px">
+          <div class="q">
+            <div class="label">Что сдаёте</div>
+            <div class="checks" id="returnItems"></div>
+          </div>
+          <div class="q">
+            <div class="label">Причина</div>
+            <div class="choices" id="reason"></div>
+          </div>
+          <div class="q hidden" id="newFormatQ">
+            <div class="label">Новый формат работы</div>
+            <div class="choices" id="newFormat"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="submit staff-only">
+      <button class="btn" type="submit" id="send">Отправить заявку</button>
+      <span class="err" id="err" role="alert"></span>
+    </div>
+  </form>
+
+  <div id="done" class="done hidden">
+    <span class="tag" id="doneId"></span>
+    <h2>Заявка отправлена</h2>
+    <p class="muted">Ответственный в офисе получил уведомление и свяжется с вами, когда всё будет готово.</p>
+    <ul id="doneItems"></ul>
+    <button class="btn ghost" type="button" id="again">Отправить ещё одну</button>
+  </div>
+</div>
+
+<script src="offices.js"></script>
+<script src="assets/api.js"></script>
+<script src="assets/form.js"></script>
+</body>
+</html>
