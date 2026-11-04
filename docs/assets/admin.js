@@ -699,8 +699,21 @@
         el('td', { class: 'n' }, el('span', { class: 'tag', text: String(totals[n].all) })))))));
 
     const floors = Object.keys(byFloor).sort((x, y) => Number(x) - Number(y));
+    const clearBtn = el('button', { class: 'btn danger', type: 'button', text: 'Очистить…' });
+    clearBtn.addEventListener('click', () => formDialog({
+      title: 'Очистить «Мебель по местам»', submit: 'Удалить строки',
+      fields: [{ key: 'scope', label: 'Что удалить', type: 'select', value: 'import', options: [
+        { value: 'import', text: 'Только загруженное из файла' },
+        { value: 'all', text: 'Все строки — и расставленное с сайта тоже' }] }],
+      onSubmit: async v => {
+        if (!confirm(v.scope === 'all' ? 'Удалить ВСЕ строки «Мебели по местам»? Склад не изменится. Отменить нельзя.'
+                                       : 'Удалить все строки, загруженные из файла? Склад не изменится. Отменить нельзя.')) throw new Error('Отменено.');
+        const res = await api('clearFurniture', { scope: v.scope });
+        toast(res.message); route();
+      }
+    }));
     main.replaceChildren(
-      head('Мебель по местам', 'Что стоит на этажах и в общих зонах офиса и ни за кем не числится.', opBtn),
+      head('Мебель по местам', 'Что стоит на этажах и в общих зонах офиса и ни за кем не числится.', clearBtn, opBtn),
       rows.length ? el('div', {},
         el('h2', { style: 'margin-bottom:10px', text: 'По офису' }), summary,
         el('h2', { style: 'margin-bottom:10px', text: 'По зонам' }),
