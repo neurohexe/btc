@@ -146,3 +146,17 @@ td[contenteditable]:focus { outline: 2px solid var(--accent); background: #fff; 
 .day td:nth-child(5) { width: 170px; }
 .day td:nth-child(7) { width: 100px; }
 @media (max-width: 560px) { .bar-user #barUser { display: none; } .bar-office strong { font-size: 15px; } }
+
+/* Названия позиций */
+dialog.sheet.wide { width: min(860px, calc(100% - 24px)); }
+.sheet-form { display: flex; flex-direction: column; max-height: calc(100vh - 32px); }
+.sheet-foot .err { margin-right: auto; }
+tr.changed td:nth-child(2) input { border-color: var(--accent); background: var(--accent-soft); }
+.ok-text { color: var(--ok); }
+.warn-text { color: var(--warn); font-weight: 500; }
+@media (max-width: 560px) {
+  dialog.sheet.wide thead { display: none; }
+  dialog.sheet.wide table, dialog.sheet.wide tbody, dialog.sheet.wide tr, dialog.sheet.wide td { display: block; width: 100%; }
+  dialog.sheet.wide tr { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  dialog.sheet.wide td { border: 0; padding: 3px 0; }
+}
