@@ -82,7 +82,7 @@
 
   // ---------- Разделы ----------
 
-  const VIEWS = { overview, requests, stock, issued, furniture, journal, import: importView };
+  const VIEWS = { overview, requests, stock, issued, furniture, journal, import: importView, team };
 
   function route() {
     if (!session) return;
@@ -225,28 +225,176 @@
     return catalogCache;
   }
 
+  const NO_CAT = 'Без категории';
+  const collapsed = new Set(store.get('tmc_collapsed') || []);
+
   async function stock(main) {
     const c = await loadCatalog();
     const q = el('input', { type: 'search', placeholder: 'Поиск по позиции или категории' });
-    const tbody = el('tbody');
+    const box = el('div', { class: 'cat-groups' });
+    const COLS = ['Позиция', 'Категория', 'Сотрудникам', 'Кому', 'Мин.', 'На складе', 'В работе', 'Доступно', ''];
+
     const render = () => {
       const w = norm(q.value);
-      const rows = c.items.filter(i => !w || norm(i.name + ' ' + i.category).indexOf(w) >= 0);
-      tbody.replaceChildren(...(rows.length ? rows.map(stockRow) : [el('tr', {}, el('td', { colspan: 9 }, empty('Ничего не найдено')))]));
+      const items = c.items.filter(i => !w || norm(i.name + ' ' + i.category).indexOf(w) >= 0);
+      // Порядок групп — как в списке категорий; пустые категории тоже показываем (кроме поиска)
+      const names = c.categories.slice();
+      items.forEach(i => { if (i.category && names.indexOf(i.category) < 0) names.push(i.category); });
+      names.push(NO_CAT);
+      const groups = names.map(n => ({ name: n, items: items.filter(i => (i.category || NO_CAT) === n) }))
+        .filter(g => g.items.length || (!w && g.name !== NO_CAT));
+      if (!groups.length) { box.replaceChildren(empty('Ничего не найдено')); return; }
+      box.replaceChildren(...groups.map(g => catGroup(g, !!w)));
     };
+
+    function catGroup(g, searching) {
+      const open = searching || !collapsed.has(g.name);
+      const isReal = g.name !== NO_CAT;
+      const toggle = el('button', { class: 'cat-toggle', type: 'button', 'aria-expanded': String(open) },
+        el('span', { class: 'chev', 'aria-hidden': 'true', text: '▸' }),
+        el('h2', { text: g.name }),
+        el('span', { class: 'muted small', text: g.items.length + ' ' + plural(g.items.length, 'позиция', 'позиции', 'позиций') }));
+      const tools = el('div', { class: 'cat-tools' },
+        el('button', { class: 'link', type: 'button', text: '+ Позиция', onclick: () => openNewItem(isReal ? g.name : '') }),
+        isReal ? el('button', { class: 'link', type: 'button', text: 'Переименовать', onclick: () => renameCategory(g.name) }) : null,
+        isReal ? el('button', { class: 'link danger-link', type: 'button', text: 'Удалить категорию', onclick: () => deleteCategory(g.name, g.items.length) }) : null);
+      const table = el('div', { class: 'table-wrap' }, el('table', { class: 'stock' },
+        el('thead', {}, el('tr', {}, ...COLS.map((h, i) => el('th', { class: i >= 4 && i <= 7 ? 'n' : '', text: h })))),
+        el('tbody', {}, ...(g.items.length ? g.items.map(stockRow)
+          : [el('tr', {}, el('td', { colspan: COLS.length, class: 'muted', text: 'В этой категории пока нет позиций.' }))]))));
+      const sec = el('section', { class: 'cat-group' + (open ? '' : ' closed') }, el('div', { class: 'cat-head' }, toggle, tools), table);
+      toggle.addEventListener('click', () => {
+        const nowOpen = sec.classList.toggle('closed') === false;
+        toggle.setAttribute('aria-expanded', String(nowOpen));
+        if (nowOpen) collapsed.delete(g.name); else collapsed.add(g.name);
+        store.set('tmc_collapsed', [...collapsed]);
+      });
+      return sec;
+    }
+
     q.addEventListener('input', render);
-    const opBtn = el('button', { class: 'btn', type: 'button', text: 'Операция со складом' });
-    opBtn.addEventListener('click', () => openOp());
-    const nameBtn = el('button', { class: 'btn ghost', type: 'button', text: 'Привести названия в порядок' });
-    nameBtn.addEventListener('click', () => openRename());
+    const opBtn = el('button', { class: 'btn', type: 'button', text: 'Операция со складом', onclick: () => openOp() });
+    const addBtn = el('button', { class: 'btn ghost', type: 'button', text: '+ Новая позиция', onclick: () => openNewItem('') });
+    const catBtn = el('button', { class: 'btn ghost', type: 'button', text: '+ Категория', onclick: () => newCategory() });
+    const nameBtn = el('button', { class: 'btn ghost', type: 'button', text: 'Привести названия в порядок', onclick: () => openRename() });
     main.replaceChildren(
-      head('Склад', c.items.length + ' ' + plural(c.items.length, 'позиция', 'позиции', 'позиций') + '. Категорию, выдачу и минимум можно менять прямо в таблице.', nameBtn, opBtn),
-      el('div', { class: 'toolbar' }, q),
-      el('div', { class: 'table-wrap' }, el('table', {},
-        el('thead', {}, el('tr', {}, ...['Позиция', 'Категория', 'Сотрудникам', 'Кому', 'Мин.', 'На складе', 'В работе', 'Доступно', ''].map((h, i) =>
-          el('th', { class: i >= 4 && i <= 7 ? 'n' : '', text: h })))),
-        tbody)));
+      head('Склад', c.items.length + ' ' + plural(c.items.length, 'позиция', 'позиции', 'позиций') + ' по категориям. Категорию, выдачу и минимум можно менять прямо в строке.', opBtn),
+      el('div', { class: 'toolbar' }, q, addBtn, catBtn, nameBtn),
+      box);
     render();
+  }
+
+  // ---------- Простое окно с полями (новая позиция, категория) ----------
+
+  let formDlg = null;
+  function formDialog({ title, fields, submit, onSubmit }) {
+    if (!formDlg) { formDlg = el('dialog', { class: 'sheet' }); document.body.append(formDlg); }
+    const inputs = {};
+    const err = el('p', { class: 'err', role: 'alert' });
+    const btn = el('button', { class: 'btn', type: 'submit', text: submit });
+    const body = el('div', { class: 'sheet-body' }, ...fields.map(f => {
+      if (f.type === 'check') {
+        const x = el('input', { type: 'checkbox', checked: !!f.value });
+        inputs[f.key] = x;
+        return el('label', { class: 'check' }, x, el('span', { text: f.label }));
+      }
+      const x = f.type === 'select'
+        ? el('select', {}, ...f.options.map(o => el('option', { value: o.value != null ? o.value : o, text: o.text != null ? o.text : o })))
+        : el('input', { type: f.type || 'text', placeholder: f.placeholder || '' });
+      if (f.value != null) x.value = f.value;
+      inputs[f.key] = x;
+      const wrap = el('label', { class: 'field' + (f.hidden ? ' hidden' : ''), 'data-key': f.key }, el('span', { text: f.label }), x);
+      return wrap;
+    }), err);
+    const form = el('form', { class: 'sheet-form' },
+      el('header', { class: 'sheet-head' }, el('h2', { text: title }), el('button', { class: 'link', type: 'button', text: 'Закрыть', onclick: () => formDlg.close() })),
+      body, el('footer', { class: 'sheet-foot' }, btn));
+    form.addEventListener('change', () => fields.forEach(f => {
+      if (f.showIf) body.querySelector('[data-key="' + f.key + '"]').classList.toggle('hidden', !f.showIf(inputs));
+    }));
+    form.addEventListener('submit', async ev => {
+      ev.preventDefault();
+      const v = {};
+      Object.keys(inputs).forEach(k => { v[k] = inputs[k].type === 'checkbox' ? inputs[k].checked : inputs[k].value.trim(); });
+      btn.disabled = true; err.textContent = '';
+      try { await onSubmit(v); formDlg.close(); }
+      catch (e) { err.textContent = e.message; }
+      finally { btn.disabled = false; }
+    });
+    formDlg.replaceChildren(form);
+    formDlg.showModal();
+    form.dispatchEvent(new Event('change'));
+    const first = body.querySelector('input,select'); if (first) first.focus();
+  }
+
+  async function reloadStock(msg) {
+    if (msg) toast(msg);
+    catalogCache = null;
+    if (location.hash === '#stock') route();
+  }
+
+  function openNewItem(category) {
+    const c = catalogCache;
+    formDialog({
+      title: 'Новая позиция', submit: 'Добавить позицию',
+      fields: [
+        { key: 'name', label: 'Название', placeholder: 'например, Настольная лампа' },
+        { key: 'category', label: 'Категория', type: 'select', value: category || '',
+          options: [{ value: '', text: NO_CAT }].concat(c.categories) },
+        { key: 'forEmployees', label: 'Выдаётся сотрудникам по заявке', type: 'check', value: true },
+        { key: 'audience', label: 'Кому выдаётся', type: 'select', options: c.audiences, showIf: i => i.forEmployees.checked },
+        { key: 'min', label: 'Минимальный остаток (когда напомнить докупить)', type: 'number', value: '0' }
+      ],
+      onSubmit: async v => {
+        if (!v.name) throw new Error('Введите название позиции.');
+        const res = await api('addItem', { item: v });
+        reloadStock(res.message + ' Чтобы поставить её на склад — «Операция со складом → Поступление».');
+      }
+    });
+  }
+
+  function newCategory() {
+    formDialog({
+      title: 'Новая категория', submit: 'Добавить категорию',
+      fields: [{ key: 'name', label: 'Название', placeholder: 'например, Техника' }],
+      onSubmit: async v => { const res = await api('addCategory', { name: v.name }); reloadStock(res.message); }
+    });
+  }
+
+  function renameCategory(name) {
+    formDialog({
+      title: 'Переименовать категорию', submit: 'Сохранить',
+      fields: [{ key: 'to', label: 'Новое название для «' + name + '»', value: name }],
+      onSubmit: async v => {
+        if (v.to === name) return;
+        const res = await api('renameCategory', { from: name, to: v.to }); reloadStock(res.message);
+      }
+    });
+  }
+
+  async function deleteCategory(name, count) {
+    const text = count
+      ? 'Удалить категорию «' + name + '»? Её ' + count + ' ' + plural(count, 'позиция останется', 'позиции останутся', 'позиций останутся') + ' на складе, но без категории.'
+      : 'Удалить пустую категорию «' + name + '»?';
+    if (!confirm(text)) return;
+    try { const res = await api('deleteCategory', { name }); reloadStock(res.message); }
+    catch (e) { toast(e.message, true); }
+  }
+
+  async function deleteItem(i) {
+    if (!confirm('Удалить позицию «' + i.name + '» со склада?')) return;
+    try {
+      let res = await api('deleteItem', { id: i.id });
+      if (res.needConfirm) {
+        const u = res.usage, parts = [];
+        if (u.inStock) parts.push('на складе ' + u.inStock + ' шт. — они будут списаны');
+        if (u.issuedTotal) parts.push('записей в «Выдано»: ' + u.issuedTotal + (u.issuedActive ? ' (числится за сотрудниками: ' + u.issuedActive + ')' : '') + ' — они удалятся');
+        if (u.furniture) parts.push('в «Мебели по местам»: ' + u.furniture + ' шт. — строки удалятся');
+        if (!confirm('Позиция «' + res.name + '» используется:\n• ' + parts.join('\n• ') + '\n\nИстория в журнале сохранится. Удалить?')) return;
+        res = await api('deleteItem', { id: i.id, force: true });
+      }
+      reloadStock(res.message);
+    } catch (e) { toast(e.message, true); }
   }
 
   function stockRow(i) {
@@ -257,6 +405,7 @@
         const it = await api('updateItem', { id: i.id, field, value });
         Object.assign(i, it);
         if (field === 'Категория' && value && catalogCache.categories.indexOf(it.category) < 0) catalogCache.categories.push(it.category);
+        if (field === 'Категория') { reloadStock('«' + i.name + '» → ' + (it.category || NO_CAT)); return; }   // позиция переехала в другую группу
         tr.replaceWith(stockRow(i));
         toast('Сохранено: ' + i.name);
       } catch (e) { toast(e.message, true); tr.classList.remove('saving'); }
@@ -282,8 +431,9 @@
     const min = el('input', { type: 'number', min: '0', value: String(i.min), 'aria-label': 'Минимальный остаток' });
     min.addEventListener('change', () => save('Мин. остаток', min.value));
     const tagCls = i.inStock <= 0 ? 'tag zero' : (i.status === 'Докупить' ? 'tag low' : 'tag');
-    const op = el('button', { class: 'link', type: 'button', text: 'Операция' });
-    op.addEventListener('click', () => openOp(i.name));
+    const op = el('span', { class: 'row-actions' },
+      el('button', { class: 'link', type: 'button', text: 'Операция', onclick: () => openOp(i.name) }),
+      el('button', { class: 'link danger-link', type: 'button', text: 'Удалить', onclick: () => deleteItem(i) }));
     tr.append(
       el('td', {}, el('b', { text: i.name }), el('span', { class: 'sub', text: i.id })),
       el('td', {}, cat), el('td', {}, emp), el('td', {}, aud), el('td', { class: 'n' }, min),
@@ -555,6 +705,100 @@
     main.replaceChildren(head('Журнал операций', 'Каждое движение по складу: поступления, выдачи, возвраты, списания.'),
       el('div', { class: 'toolbar' }, q, op, from, to), box, more);
     await load(false);
+  }
+
+  // ---------- Ответственные ----------
+
+  async function team(main) {
+    let info = await api('responsibles');
+    const receivers = el('p', { class: 'receivers' });
+    const tbody = el('tbody');
+    const showReceivers = () => {
+      receivers.replaceChildren(el('span', { class: 'muted', text: 'Сейчас уведомления о заявках получает: ' }),
+        el('b', { text: info.receivers.length ? info.receivers.join(', ') : 'никто — проверьте Telegram и «Уведомления»' }));
+    };
+
+    // Куда слать: общий чат или лично
+    const mode = el('select', { 'aria-label': 'Куда слать уведомления' }, ...info.modes.map(m => el('option', { value: m, text: m })));
+    mode.value = info.mode;
+    const group = el('input', { type: 'text', value: info.group, placeholder: 'chat_id общего чата, например -1001234567890' });
+    const groupWrap = el('label', { class: 'field' }, el('span', { text: 'chat_id общего чата' }), group,
+      el('span', { class: 'small muted', text: 'Добавьте бота в рабочий чат и напишите там /chatid — бот пришлёт номер.' }));
+    const saveMode = async () => {
+      try { info = await api('saveNotifyMode', { mode: mode.value, group: group.value }); showReceivers(); toast('Сохранено'); }
+      catch (e) { toast(e.message, true); }
+    };
+    const syncMode = () => groupWrap.classList.toggle('hidden', mode.value !== 'Общий чат');
+    mode.addEventListener('change', () => { syncMode(); saveMode(); });
+    group.addEventListener('change', saveMode);
+    syncMode();
+
+    const iso = v => { if (!v) return ''; const d = new Date(v); return isNaN(d) ? '' : d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+
+    function personRow(p) {
+      const tr = el('tr');
+      const name = el('input', { type: 'text', value: p.name || '', placeholder: 'Имя Фамилия', 'aria-label': 'ФИО' });
+      const role = el('select', { 'aria-label': 'Роль' }, ...info.roles.map(r => el('option', { value: r, text: r }))); role.value = p.role || info.roles[0];
+      const login = el('input', { type: 'text', value: p.login || '', placeholder: 'логин', 'aria-label': 'Логин' });
+      const tg = el('input', { type: 'text', value: p.username ? '@' + p.username : '', placeholder: '@username', 'aria-label': 'Telegram' });
+      const notify = el('select', { 'aria-label': 'Получает уведомления' }, el('option', { value: 'да', text: 'да' }), el('option', { value: 'нет', text: 'нет' }));
+      notify.value = p.row && !p.notify ? 'нет' : 'да';
+      const status = el('select', { 'aria-label': 'Статус' }, ...info.statuses.map(s => el('option', { value: s, text: s }))); status.value = p.status || info.statuses[0];
+      const until = el('input', { type: 'date', value: iso(p.until), 'aria-label': 'Отсутствует до' });
+      const linked = el('span', { class: 'small ' + (p.chatId ? 'ok-text' : 'muted'), text: p.chatId ? 'подключён' : (p.username ? 'нужно написать боту /start' : '—') });
+      const away = el('span', { class: 'status ' + (p.absent ? 'off' : 'done'), text: p.absent ? 'отсутствует' : 'на месте' });
+      const syncUntil = () => { until.disabled = status.value === info.statuses[0]; if (until.disabled) until.value = ''; };
+      syncUntil();
+      const save = async () => {
+        if (!name.value.trim() && !tg.value.trim()) return;      // пустую строку не сохраняем
+        tr.classList.add('saving');
+        try {
+          info = await api('saveResponsible', { person: { row: p.row || null, name: name.value, role: role.value, login: login.value,
+            username: tg.value, notify: notify.value === 'да', status: status.value, until: until.value } });
+          showReceivers();
+          if (!p.row) { drawRows(); toast('Добавлено: ' + (name.value || tg.value)); return; }
+          const fresh = info.list.find(x => x.row === p.row) || p;
+          Object.assign(p, fresh);
+          tr.replaceWith(personRow(p));
+          toast('Сохранено: ' + (p.name || '@' + p.username));
+        } catch (e) { toast(e.message, true); tr.classList.remove('saving'); }
+      };
+      status.addEventListener('change', syncUntil);
+      [name, role, login, tg, notify, status, until].forEach(x => x.addEventListener('change', save));
+      const del = el('button', { class: 'link danger-link', type: 'button', text: p.row ? 'Удалить' : 'Убрать' });
+      del.addEventListener('click', async () => {
+        if (!p.row) { tr.remove(); return; }
+        if (!confirm('Удалить «' + (p.name || p.username) + '» из ответственных?')) return;
+        try { info = await api('deleteResponsible', { row: p.row }); showReceivers(); drawRows(); toast('Удалено'); }
+        catch (e) { toast(e.message, true); }
+      });
+      tr.append(el('td', {}, name), el('td', {}, role), el('td', {}, login), el('td', {}, tg, el('div', {}, linked)),
+        el('td', {}, notify), el('td', {}, status, el('div', { style: 'margin-top:4px' }, away)), el('td', {}, until), el('td', {}, del));
+      return tr;
+    }
+    const drawRows = () => tbody.replaceChildren(...info.list.map(personRow));
+
+    const add = el('button', { class: 'btn ghost', type: 'button', text: '+ Добавить человека' });
+    add.addEventListener('click', () => {
+      const tr = personRow({ row: null, role: info.list.some(x => x.role === 'Ответственный') ? 'Заместитель' : 'Ответственный', notify: true });
+      tbody.append(tr);
+      tr.querySelector('input').focus();
+    });
+
+    main.replaceChildren(
+      head('Ответственные', 'Кто ведёт склад офиса и получает уведомления о заявках.'),
+      el('div', { class: 'panel team-settings' },
+        el('label', { class: 'field' }, el('span', { text: 'Куда слать уведомления' }), mode), groupWrap),
+      el('div', { class: 'note', style: 'margin:14px 0' },
+        el('p', { text: 'Когда основной ответственный в отпуске или на больничном, уведомления получают заместители. После даты «до» он снова считается на месте — менять статус обратно не нужно.' }),
+        el('p', { class: 'small muted', style: 'margin-top:6px', text: 'Чтобы получать уведомления лично, человек пишет боту в Telegram /start — тогда появится «подключён». Работает при способе «Лично ответственным».' })),
+      receivers,
+      el('div', { class: 'table-wrap' }, el('table', { class: 'team' },
+        el('thead', {}, el('tr', {}, ...['ФИО', 'Роль', 'Логин', 'Telegram', 'Уведомления', 'Статус', 'Отсутствует до', ''].map(h => el('th', { text: h })))),
+        tbody)),
+      el('div', { class: 'toolbar', style: 'margin-top:12px' }, add));
+    showReceivers();
+    drawRows();
   }
 
   // ---------- Загрузка из файла ----------
