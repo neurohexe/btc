@@ -191,3 +191,16 @@ table.team { table-layout: fixed; }
 table.team th:nth-child(1) { width: 170px; } table.team th:nth-child(2) { width: 160px; } table.team th:nth-child(3) { width: 120px; }
 table.team th:nth-child(4) { width: 180px; } table.team th:nth-child(5) { width: 100px; } table.team th:nth-child(6) { width: 170px; }
 table.team th:nth-child(7) { width: 160px; } table.team th:nth-child(8) { width: 80px; }
+
+/* Установка по этажам */
+#opPlace { display: flex; flex-direction: column; gap: 10px; }
+#opPlace.hidden { display: none; }
+.floors-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.field-label { font-weight: 500; font-size: 14px; }
+.floor-tools { display: flex; gap: 14px; font-size: 14px; }
+table.floors td { padding: 6px 10px; }
+table.floors td:first-child { white-space: nowrap; width: 80px; }
+table.floors td:nth-child(2) { width: 110px; }
+table.floors input { width: 100%; }
+table.matrix td.n, table.matrix th.n { width: 72px; }
+table.matrix td:first-child { min-width: 180px; }
