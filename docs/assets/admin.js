@@ -632,19 +632,43 @@
         const rows = await api('issued', { q: q.value, active: all.value === 'active' });
         box.replaceChildren(rows.length
           ? el('div', { class: 'table-wrap' }, el('table', {},
-              el('thead', {}, el('tr', {}, ...['Логин', 'Этаж', 'Стол', 'Позиция', 'Формат', 'Выдано', '№ заявки', 'Статус'].map(h => el('th', { text: h })))),
+              el('thead', {}, el('tr', {}, ...['Логин', 'Этаж', 'Стол', 'Позиция', 'Формат', 'Выдано', '№ заявки', 'Статус', ''].map(h => el('th', { text: h })))),
               el('tbody', {}, ...rows.map(r => el('tr', {},
                 el('td', { text: r['Логин'] || '—' }), el('td', { text: r['Этаж'] }), el('td', { text: r['Стол'] }),
                 el('td', {}, el('b', { text: r['Позиция'] })), el('td', { text: r['Формат работы'] }),
                 el('td', { text: fmtDate(r['Дата выдачи']) }), el('td', { text: r['№ заявки'] }),
-                el('td', {}, el('span', { class: 'status ' + (r['Статус'] === 'Числится' ? 'done' : 'off'), text: r['Статус'] + (r['Дата сдачи'] ? ' ' + fmtDate(r['Дата сдачи']) : '') })))))))
+                el('td', {}, el('span', { class: 'status ' + (r['Статус'] === 'Числится' ? 'done' : 'off'), text: r['Статус'] + (r['Дата сдачи'] ? ' ' + fmtDate(r['Дата сдачи']) : '') })),
+                el('td', {}, el('button', { class: 'link danger-link', type: 'button', text: 'Удалить', onclick: () => delIssued(r) })))))))
           : empty('Ничего не найдено'));
         box.prepend(el('p', { class: 'muted small', style: 'margin-bottom:8px', text: 'Показано: ' + rows.length }));
       } catch (e) { box.replaceChildren(el('div', { class: 'note bad', text: e.message })); }
     };
     q.addEventListener('input', debounce(load, 400));
     all.addEventListener('change', load);
-    main.replaceChildren(head('Выдано сотрудникам', 'Что за кем числится. Появляется после «Выдано» по заявке или при загрузке из файла.'),
+
+    async function delIssued(r) {
+      const who = (r['Логин'] && r['Логин'] !== '-' ? r['Логин'] : 'стол ' + r['Стол']);
+      if (!confirm('Удалить запись «' + r['Позиция'] + '» — ' + who + '?\n\nСклад не изменится. Если вещь вернули — лучше оформить заявку «Сдать».')) return;
+      try { const res = await api('deleteIssued', { row: r._row }); toast(res.message); load(); }
+      catch (e) { toast(e.message, true); }
+    }
+    const clearBtn = el('button', { class: 'btn danger', type: 'button', text: 'Очистить…' });
+    clearBtn.addEventListener('click', () => formDialog({
+      title: 'Очистить «Выдано»', submit: 'Удалить записи',
+      fields: [{ key: 'scope', label: 'Что удалить', type: 'select', value: 'import', options: [
+        { value: 'import', text: 'Только загруженное из файла («импорт»)' },
+        { value: 'all', text: 'Все записи о выдаче — и по заявкам тоже' }] }],
+      onSubmit: async v => {
+        const text = v.scope === 'all'
+          ? 'Удалить ВСЕ сведения о том, что за кем числится?\n\nОстатки склада и журнал выдач по заявкам сохранятся. Отменить нельзя.'
+          : 'Удалить все записи, загруженные из файла?\n\nОстатки склада не изменятся. Отменить нельзя.';
+        if (!confirm(text)) throw new Error('Отменено.');
+        const res = await api('clearIssued', { scope: v.scope });
+        toast(res.message); load();
+      }
+    }));
+
+    main.replaceChildren(head('Выдано сотрудникам', 'Что за кем числится. Появляется после «Выдано» по заявке или при загрузке из файла.', clearBtn),
       el('div', { class: 'toolbar' }, q, all), box);
     await load();
   }
