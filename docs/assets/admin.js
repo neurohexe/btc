@@ -302,7 +302,7 @@
       renameDlg = el('dialog', { class: 'sheet wide' });
       document.body.append(renameDlg);
     }
-    const body = el('div', { class: 'sheet-body' }, el('div', { class: 'loading', text: 'ИИ подбирает аккуратные названия…' }));
+    const body = el('div', { class: 'sheet-body' }, el('div', { class: 'loading', text: 'Загружаю позиции…' }));
     const apply = el('button', { class: 'btn', type: 'button', text: 'Применить', disabled: true });
     const err = el('p', { class: 'err', role: 'alert' });
     renameDlg.replaceChildren(el('div', { class: 'sheet-form' },
@@ -338,14 +338,40 @@
     };
     rows.forEach(r => r.input.addEventListener('input', refresh));
 
+    // Строка состояния ИИ: таблица уже работает, предложения ИИ подставятся, когда придут
+    const aiLine = el('div', { class: 'note ai-line' });
+    const askAi = async () => {
+      aiLine.className = 'note ai-line';
+      aiLine.replaceChildren(el('span', { text: 'ИИ подбирает названия: единственное число, без капса, понятные слова… Обычно это до минуты. Пока можно править вручную.' }));
+      try {
+        const res = await api('aiNames');
+        let n = 0;
+        rows.forEach(r => {
+          const s = res.names[r.i.name];
+          if (!s || r.input.dataset.edited) return;            // то, что вы уже поправили, не трогаем
+          r.input.value = s; n++;
+        });
+        refresh();
+        aiLine.className = 'note ok ai-line';
+        aiLine.replaceChildren(el('span', { text: 'ИИ предложил названия. Проверьте и поправьте, где нужно.' }));
+      } catch (e) {
+        aiLine.className = 'note warn ai-line';
+        const again = el('button', { class: 'btn ghost small', type: 'button', text: 'Спросить ИИ ещё раз' });
+        again.addEventListener('click', askAi);
+        aiLine.replaceChildren(el('span', { text: 'ИИ не ответил вовремя (обычно это перегрузка у Google на пару минут). Предложен только аккуратный регистр — можно поправить вручную или спросить ещё раз.' }), again);
+      }
+    };
+    rows.forEach(r => r.input.addEventListener('input', () => { r.input.dataset.edited = '1'; }));
+
     body.replaceChildren(
-      el('p', { class: 'muted small', text: (data.aiUsed ? 'ИИ предложил названия: единственное число, без капса, понятные слова. ' : 'ИИ не настроен — предложен только аккуратный регистр. ') +
-        'Проверьте и поправьте. Название поменяется везде: на складе, в журнале, в «Выдано», в мебели по местам и в заявках. ' +
+      data.aiReady ? aiLine : el('div', { class: 'note ai-line', text: 'ИИ не настроен — предложен только аккуратный регистр.' }),
+      el('p', { class: 'muted small', text: 'Название поменяется везде: на складе, в журнале, в «Выдано», в мебели по местам и в заявках. ' +
         'Если у двух позиций одинаковое название — они объединятся в одну. Старые названия система запомнит для следующих загрузок из файла.' }),
       el('div', { class: 'table-wrap' }, el('table', {},
         el('thead', {}, el('tr', {}, el('th', { text: 'Сейчас' }), el('th', { text: 'Станет' }), el('th', { text: '' }))),
         el('tbody', {}, ...rows.map(r => r.tr)))));
     refresh();
+    if (data.aiReady) askAi();
 
     apply.onclick = async () => {
       const changes = rows.filter(r => r.input.value.trim() && r.input.value.trim() !== r.i.name).map(r => ({ id: r.i.id, to: r.input.value.trim() }));
