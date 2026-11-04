@@ -160,3 +160,4 @@ tr.changed td:nth-child(2) input { border-color: var(--accent); background: var(
   dialog.sheet.wide tr { padding: 10px 12px; border-bottom: 1px solid var(--line); }
   dialog.sheet.wide td { border: 0; padding: 3px 0; }
 }
+.ai-line { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; font-size: 14px; }
