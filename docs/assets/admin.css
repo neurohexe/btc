@@ -161,3 +161,33 @@ tr.changed td:nth-child(2) input { border-color: var(--accent); background: var(
   dialog.sheet.wide td { border: 0; padding: 3px 0; }
 }
 .ai-line { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; font-size: 14px; }
+
+/* Склад по категориям */
+.cat-groups { display: flex; flex-direction: column; gap: 18px; }
+.cat-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.cat-toggle { display: flex; align-items: baseline; gap: 10px; background: none; border: 0; padding: 4px 0; cursor: pointer; font: inherit; color: var(--ink); text-align: left; }
+.cat-toggle h2 { font-size: 18px; }
+.cat-toggle .chev { display: inline-block; color: var(--muted); transform: rotate(90deg); transition: transform .15s; }
+.cat-group.closed .chev { transform: none; }
+.cat-group.closed .table-wrap { display: none; }
+.cat-tools { display: flex; gap: 16px; flex-wrap: wrap; font-size: 14px; }
+.danger-link { color: var(--bad) !important; }
+.row-actions { display: flex; gap: 12px; white-space: nowrap; }
+table.stock { table-layout: fixed; min-width: 1040px; }
+table.stock th:nth-child(1) { width: 200px; } table.stock th:nth-child(2) { width: 190px; }
+table.stock th:nth-child(3) { width: 110px; } table.stock th:nth-child(4) { width: 180px; }
+table.stock th:nth-child(5) { width: 80px; } table.stock th:nth-child(6) { width: 96px; }
+table.stock th:nth-child(7) { width: 80px; } table.stock th:nth-child(8) { width: 84px; }
+table.stock th:nth-child(9) { width: 150px; }
+table.stock td select { width: 100%; min-width: 0; }
+
+/* Ответственные */
+.team-settings { padding: 16px 18px; display: grid; grid-template-columns: minmax(220px, 320px) 1fr; gap: 16px; align-items: start; }
+.receivers { margin: 0 0 10px; }
+table.team { min-width: 1080px; }
+table.team td input, table.team td select { width: 100%; min-width: 0; }
+@media (max-width: 700px) { .team-settings { grid-template-columns: 1fr; } }
+table.team { table-layout: fixed; }
+table.team th:nth-child(1) { width: 170px; } table.team th:nth-child(2) { width: 160px; } table.team th:nth-child(3) { width: 120px; }
+table.team th:nth-child(4) { width: 180px; } table.team th:nth-child(5) { width: 100px; } table.team th:nth-child(6) { width: 170px; }
+table.team th:nth-child(7) { width: 160px; } table.team th:nth-child(8) { width: 80px; }
