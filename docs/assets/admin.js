@@ -542,7 +542,7 @@
 
   const OP_HINT = {
     in: 'Пришло от поставщика — количество на складе увеличится.',
-    install: 'Со склада в общую зону офиса: появится в «Мебели по местам».',
+    install: 'По этажам офиса: со склада или то, что уже стоит на местах. Появится в «Мебели по местам».',
     writeoff: 'Сломано или утеряно — уйдёт со склада.',
     adjust: 'После пересчёта: поправить количество на складе.'
   };
@@ -554,7 +554,11 @@
     if (itemName) $('opItem').value = itemName;
     $('opCats').replaceChildren(...c.categories.map(x => el('option', { value: x })));
     $('opNewAud').replaceChildren(...c.audiences.map(x => el('option', { value: x, text: x })));
-    $('opFloor').replaceChildren(...Array.from({ length: c.floors }, (_, k) => el('option', { value: String(k + 1), text: String(k + 1) })));
+    $('opFloors').replaceChildren(...Array.from({ length: c.floors }, (_, k) => el('tr', {},
+      el('td', { text: 'Этаж ' + (k + 1) }),
+      el('td', {}, el('input', { type: 'number', min: '0', value: '', placeholder: '0', 'data-floor': String(k + 1), 'aria-label': 'Количество на этаж ' + (k + 1) })),
+      el('td', {}, el('input', { type: 'text', 'data-room': String(k + 1), placeholder: 'например, кухня', 'aria-label': 'Зона на этаже ' + (k + 1) })))));
+    $('opInPlace').checked = false;
     $('opErr').textContent = '';
     updateOp();
     $('opDialog').showModal();
@@ -568,10 +572,26 @@
     $('opNewAudWrap').classList.toggle('hidden', !$('opNewEmp').checked);
     $('opSignWrap').classList.toggle('hidden', t !== 'adjust');
     $('opPlace').classList.toggle('hidden', t !== 'install');
+    $('opQtyWrap').classList.toggle('hidden', t === 'install');
+    if (t === 'install') {
+      const total = opPlaces().reduce((s, p) => s + p.qty, 0);
+      const it0 = catalogCache && catalogCache.items.find(i => i.name === $('opItem').value);
+      $('opTotal').textContent = 'Всего: ' + total + ' шт.' + (!$('opInPlace').checked && it0 ? ' Со склада спишется столько же (на складе ' + it0.inStock + ').' : '');
+      $('opTotal').className = 'small ' + (!$('opInPlace').checked && it0 && total > it0.inStock ? 'err' : 'muted');
+    }
     const it = catalogCache && catalogCache.items.find(i => i.name === $('opItem').value);
     $('opStock').textContent = it ? 'На складе: ' + it.inStock + ' шт., доступно для выдачи: ' + it.available : '';
   }
   $('opForm').addEventListener('change', updateOp);
+  $('opForm').addEventListener('input', e => { if (e.target.closest('#opFloors')) updateOp(); });
+  function opPlaces() {
+    return [...document.querySelectorAll('#opFloors input[data-floor]')].map(x => ({
+      floor: x.dataset.floor, qty: Math.max(0, parseInt(x.value, 10) || 0),
+      room: document.querySelector('#opFloors input[data-room="' + x.dataset.floor + '"]').value.trim()
+    })).filter(p => p.qty > 0);
+  }
+  $('opAllFloors').addEventListener('click', () => { document.querySelectorAll('#opFloors input[data-floor]').forEach(x => { x.value = '1'; }); updateOp(); });
+  $('opClearFloors').addEventListener('click', () => { document.querySelectorAll('#opFloors input').forEach(x => { x.value = ''; }); updateOp(); });
   $('opDialog').querySelector('[data-close]').addEventListener('click', () => $('opDialog').close());
 
   $('opForm').addEventListener('submit', async ev => {
@@ -580,11 +600,12 @@
     const op = {
       type: document.querySelector('input[name=opType]:checked').value,
       item: isNew ? '' : $('opItem').value, qty: $('opQty').value, sign: $('opSign').value,
-      floor: $('opFloor').value, room: $('opRoom').value.trim(), comment: $('opComment').value.trim(),
+      places: opPlaces(), inPlace: $('opInPlace').checked, comment: $('opComment').value.trim(),
       newItem: isNew ? { name: $('opNewName').value.trim(), category: $('opNewCat').value.trim(),
         forEmployees: $('opNewEmp').checked, audience: $('opNewEmp').checked ? $('opNewAud').value : '' } : null
     };
     if (isNew && !op.newItem.name) { $('opErr').textContent = 'Введите название новой позиции.'; return; }
+    if (op.type === 'install' && !op.places.length) { $('opErr').textContent = 'Укажите количество хотя бы для одного этажа.'; return; }
     $('opSend').disabled = true; $('opSend').textContent = 'Провожу…';
     try {
       const res = await api('operation', { op });
@@ -634,20 +655,39 @@
     const rows = await api('furniture');
     const byFloor = {};
     rows.forEach(r => { (byFloor[r['Этаж']] = byFloor[r['Этаж']] || []).push(r); });
-    const floors = Object.keys(byFloor).sort((a, b) => Number(a) - Number(b));
-    const opBtn = el('button', { class: 'btn', type: 'button', text: 'Установить со склада' });
+    const nFloors = Math.max((meta && meta.floors) || 0, ...rows.map(r => Number(r['Этаж']) || 0));
+    const floorList = Array.from({ length: nFloors }, (_, k) => k + 1);
+    const opBtn = el('button', { class: 'btn', type: 'button', text: 'Расставить по этажам' });
     opBtn.addEventListener('click', async () => { await openOp(); document.querySelector('input[name=opType][value=install]').checked = true; updateOp(); });
+
+    // Сводка по офису: позиция × этаж
+    const totals = {};
+    rows.forEach(r => {
+      const t = totals[r['Позиция']] = totals[r['Позиция']] || { all: 0 };
+      const q = Number(r['Количество']) || 0;
+      t[r['Этаж']] = (t[r['Этаж']] || 0) + q; t.all += q;
+    });
+    const names = Object.keys(totals).sort((x, y) => x.localeCompare(y, 'ru'));
+    const summary = el('div', { class: 'table-wrap', style: 'margin-bottom:24px' }, el('table', { class: 'matrix' },
+      el('thead', {}, el('tr', {}, el('th', { text: 'Позиция' }), ...floorList.map(f => el('th', { class: 'n', text: f + ' эт.' })), el('th', { class: 'n', text: 'Всего' }))),
+      el('tbody', {}, ...names.map(n => el('tr', {}, el('td', {}, el('b', { text: n })),
+        ...floorList.map(f => el('td', { class: 'n' + (totals[n][f] ? '' : ' muted'), text: totals[n][f] ? String(totals[n][f]) : '—' })),
+        el('td', { class: 'n' }, el('span', { class: 'tag', text: String(totals[n].all) })))))));
+
+    const floors = Object.keys(byFloor).sort((x, y) => Number(x) - Number(y));
     main.replaceChildren(
-      head('Мебель по местам', 'Что стоит в общих зонах офиса и ни за кем не числится.', opBtn),
-      rows.length
-        ? el('div', { class: 'table-wrap' }, el('table', {},
-            el('thead', {}, el('tr', {}, el('th', { text: 'Помещение / зона' }), el('th', { text: 'Позиция' }), el('th', { class: 'n', text: 'Кол-во' }), el('th', { text: 'Комментарий' }))),
-            el('tbody', {}, ...floors.flatMap(f => [
-              el('tr', { class: 'floor-head' }, el('td', { colspan: 4, text: 'Этаж ' + f })),
-              ...byFloor[f].map(r => el('tr', {}, el('td', { text: r['Помещение / зона'] || '—' }), el('td', {}, el('b', { text: r['Позиция'] })),
-                el('td', { class: 'n', text: String(r['Количество']) }), el('td', { class: 'muted', text: r['Комментарий'] })))
-            ]))))
-        : empty('Пока ничего не установлено. Нажмите «Установить со склада».'));
+      head('Мебель по местам', 'Что стоит на этажах и в общих зонах офиса и ни за кем не числится.', opBtn),
+      rows.length ? el('div', {},
+        el('h2', { style: 'margin-bottom:10px', text: 'По офису' }), summary,
+        el('h2', { style: 'margin-bottom:10px', text: 'По зонам' }),
+        el('div', { class: 'table-wrap' }, el('table', {},
+          el('thead', {}, el('tr', {}, el('th', { text: 'Помещение / зона' }), el('th', { text: 'Позиция' }), el('th', { class: 'n', text: 'Кол-во' }), el('th', { text: 'Комментарий' }))),
+          el('tbody', {}, ...floors.flatMap(f => [
+            el('tr', { class: 'floor-head' }, el('td', { colspan: 4, text: 'Этаж ' + f })),
+            ...byFloor[f].map(r => el('tr', {}, el('td', { text: r['Помещение / зона'] || '—' }), el('td', {}, el('b', { text: r['Позиция'] })),
+              el('td', { class: 'n', text: String(r['Количество']) }), el('td', { class: 'muted', text: r['Комментарий'] })))
+          ])))))
+        : empty('Пока ничего не расставлено. Нажмите «Расставить по этажам».'));
   }
 
   // ---------- Журнал ----------

@@ -7,8 +7,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/style.css?v=20261104c">
-<link rel="stylesheet" href="assets/admin.css?v=20261104c">
+<link rel="stylesheet" href="assets/style.css?v=20261104d">
+<link rel="stylesheet" href="assets/admin.css?v=20261104d">
 </head>
 <body>
 
@@ -76,11 +76,19 @@
         <label class="field hidden" id="opSignWrap"><span>Что показал пересчёт</span>
           <select id="opSign"><option value="+">Найдено больше (+)</option><option value="-">Не хватает (−)</option></select>
         </label>
-        <label class="field"><span>Количество, шт.</span><input type="number" id="opQty" min="1" value="1"></label>
+        <label class="field" id="opQtyWrap"><span>Количество, шт.</span><input type="number" id="opQty" min="1" value="1"></label>
       </div>
-      <div class="grid2 hidden" id="opPlace">
-        <label class="field"><span>Этаж</span><select id="opFloor"></select></label>
-        <label class="field"><span>Помещение / зона</span><input type="text" id="opRoom" placeholder="например, лаунж у кухни"></label>
+      <div class="hidden" id="opPlace">
+        <label class="check"><input type="checkbox" id="opInPlace"><span>Уже стоит в офисе — занести в учёт, не списывая со склада</span></label>
+        <div class="floors-head">
+          <span class="field-label">Сколько на какой этаж</span>
+          <span class="floor-tools">
+            <button class="link" type="button" id="opAllFloors">По 1 на все этажи</button>
+            <button class="link" type="button" id="opClearFloors">Очистить</button>
+          </span>
+        </div>
+        <div class="table-wrap"><table class="floors"><thead><tr><th>Этаж</th><th>Кол-во, шт.</th><th>Помещение / зона (необязательно)</th></tr></thead><tbody id="opFloors"></tbody></table></div>
+        <p class="small muted" id="opTotal"></p>
       </div>
       <label class="field"><span>Комментарий</span><input type="text" id="opComment"></label>
       <p class="err" id="opErr" role="alert"></p>
@@ -91,9 +99,9 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" defer></script>
-<script src="offices.js?v=20261104c"></script>
-<script src="assets/api.js?v=20261104c"></script>
-<script src="assets/admin.js?v=20261104c"></script>
-<script src="assets/import.js?v=20261104c"></script>
+<script src="offices.js?v=20261104d"></script>
+<script src="assets/api.js?v=20261104d"></script>
+<script src="assets/admin.js?v=20261104d"></script>
+<script src="assets/import.js?v=20261104d"></script>
 </body>
 </html>
