@@ -237,8 +237,10 @@
     q.addEventListener('input', render);
     const opBtn = el('button', { class: 'btn', type: 'button', text: 'Операция со складом' });
     opBtn.addEventListener('click', () => openOp());
+    const nameBtn = el('button', { class: 'btn ghost', type: 'button', text: 'Привести названия в порядок' });
+    nameBtn.addEventListener('click', () => openRename());
     main.replaceChildren(
-      head('Склад', c.items.length + ' ' + plural(c.items.length, 'позиция', 'позиции', 'позиций') + '. Категорию, выдачу и минимум можно менять прямо в таблице.', opBtn),
+      head('Склад', c.items.length + ' ' + plural(c.items.length, 'позиция', 'позиции', 'позиций') + '. Категорию, выдачу и минимум можно менять прямо в таблице.', nameBtn, opBtn),
       el('div', { class: 'toolbar' }, q),
       el('div', { class: 'table-wrap' }, el('table', {},
         el('thead', {}, el('tr', {}, ...['Позиция', 'Категория', 'Сотрудникам', 'Кому', 'Мин.', 'На складе', 'В работе', 'Доступно', ''].map((h, i) =>
@@ -290,6 +292,74 @@
       el('td', { class: 'n', text: String(i.available) }),
       el('td', {}, op));
     return tr;
+  }
+
+  // ---------- Названия позиций: переименовать и объединить ----------
+
+  let renameDlg = null;
+  async function openRename() {
+    if (!renameDlg) {
+      renameDlg = el('dialog', { class: 'sheet wide' });
+      document.body.append(renameDlg);
+    }
+    const body = el('div', { class: 'sheet-body' }, el('div', { class: 'loading', text: 'ИИ подбирает аккуратные названия…' }));
+    const apply = el('button', { class: 'btn', type: 'button', text: 'Применить', disabled: true });
+    const err = el('p', { class: 'err', role: 'alert' });
+    renameDlg.replaceChildren(el('div', { class: 'sheet-form' },
+      el('header', { class: 'sheet-head' }, el('h2', { text: 'Названия позиций' }),
+        el('button', { class: 'link', type: 'button', text: 'Закрыть', onclick: () => renameDlg.close() })),
+      body,
+      el('footer', { class: 'sheet-foot' }, err, apply)));
+    renameDlg.showModal();
+
+    let data;
+    try { data = await api('suggestNames'); } catch (e) { body.replaceChildren(el('div', { class: 'note bad', text: e.message })); return; }
+
+    const rows = data.items.map(i => {
+      const input = el('input', { type: 'text', value: i.suggestion, 'aria-label': 'Новое название для «' + i.name + '»' });
+      const note = el('td', { class: 'small' });
+      return { i, input, note, tr: el('tr', {}, el('td', {}, el('b', { text: i.name }), el('span', { class: 'sub', text: (i.category || 'без категории') + ', на складе ' + i.inStock })), el('td', {}, input), note) };
+    });
+    const refresh = () => {
+      const byName = {};
+      rows.forEach(r => { const k = norm(r.input.value); (byName[k] = byName[k] || []).push(r); });
+      let n = 0;
+      rows.forEach(r => {
+        const to = r.input.value.trim();
+        const same = byName[norm(to)].filter(x => x !== r);
+        r.tr.classList.toggle('changed', to !== r.i.name);
+        if (!to) { r.note.textContent = 'пустое — останется как есть'; r.note.className = 'small muted'; return; }
+        if (same.length) { r.note.textContent = 'объединится с «' + same.map(x => x.i.name).join('», «') + '»'; r.note.className = 'small warn-text'; n++; return; }
+        if (to !== r.i.name) { r.note.textContent = 'переименуется'; r.note.className = 'small ok-text'; n++; return; }
+        r.note.textContent = 'без изменений'; r.note.className = 'small muted';
+      });
+      apply.disabled = !n;
+      apply.textContent = n ? 'Применить (' + n + ')' : 'Применить';
+    };
+    rows.forEach(r => r.input.addEventListener('input', refresh));
+
+    body.replaceChildren(
+      el('p', { class: 'muted small', text: (data.aiUsed ? 'ИИ предложил названия: единственное число, без капса, понятные слова. ' : 'ИИ не настроен — предложен только аккуратный регистр. ') +
+        'Проверьте и поправьте. Название поменяется везде: на складе, в журнале, в «Выдано», в мебели по местам и в заявках. ' +
+        'Если у двух позиций одинаковое название — они объединятся в одну. Старые названия система запомнит для следующих загрузок из файла.' }),
+      el('div', { class: 'table-wrap' }, el('table', {},
+        el('thead', {}, el('tr', {}, el('th', { text: 'Сейчас' }), el('th', { text: 'Станет' }), el('th', { text: '' }))),
+        el('tbody', {}, ...rows.map(r => r.tr)))));
+    refresh();
+
+    apply.onclick = async () => {
+      const changes = rows.filter(r => r.input.value.trim() && r.input.value.trim() !== r.i.name).map(r => ({ id: r.i.id, to: r.input.value.trim() }));
+      const merges = rows.filter(r => /объединится/.test(r.note.textContent)).length;
+      if (merges && !confirm('Некоторые позиции объединятся в одну: их остатки и история сложатся. Отменить это потом нельзя. Продолжить?')) return;
+      apply.disabled = true; apply.textContent = 'Применяю…'; err.textContent = '';
+      try {
+        const res = await api('renameItems', { changes });
+        toast(res.message);
+        renameDlg.close();
+        catalogCache = null;
+        if (location.hash === '#stock') route();
+      } catch (e) { err.textContent = e.message; apply.disabled = false; apply.textContent = 'Применить'; }
+    };
   }
 
   // ---------- Операция со складом ----------
