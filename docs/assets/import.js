@@ -110,29 +110,70 @@
       for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
       pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
       const doc = await pdfjsLib.getDocument({ data: bytes }).promise;
-      const rows = [];
+      let rows = [], cols = null;
       for (let p = 1; p <= doc.numPages; p++) {
         const content = await (await doc.getPage(p)).getTextContent();
-        const lines = [];
-        content.items.forEach(it => {
-          const str = String(it.str || ''); if (!str.trim()) return;
-          const x = it.transform[4], y = it.transform[5];
-          let line = lines.find(l => Math.abs(l.y - y) < 3);
-          if (!line) { line = { y, parts: [] }; lines.push(line); }
-          line.parts.push({ x, end: x + (it.width || 0), str });
-        });
-        lines.sort((a, b) => b.y - a.y).forEach(l => {
-          l.parts.sort((a, b) => a.x - b.x);
-          const cells = []; let prevEnd = null;
-          l.parts.forEach(pt => {
-            if (prevEnd === null || pt.x - prevEnd > 6) cells.push(pt.str.trim());
-            else cells[cells.length - 1] += (pt.x - prevEnd > 1 ? ' ' : '') + pt.str.trim();
-            prevEnd = pt.end;
-          });
-          rows.push(cells);
-        });
+        const items = content.items.map(it => ({ x: it.transform[4], end: it.transform[4] + (it.width || 0), y: it.transform[5], str: it.str }));
+        const res = pdfPageRows(items, cols);
+        if (res.cols) cols = res.cols;
+        rows = rows.concat(res.rows);
       }
       return { pages: doc.numPages, rows };
+    }
+
+    function pdfPageRows(items, prevCols) {
+      const lines = [];
+      items.forEach(it => {
+        const str = String(it.str || '').trim(); if (!str) return;
+        let line = lines.find(l => Math.abs(l.y - it.y) < 3);
+        if (!line) { line = { y: it.y, parts: [] }; lines.push(line); }
+        line.parts.push({ x: it.x, end: Math.max(it.end, it.x), str });
+      });
+      lines.sort((a, b) => b.y - a.y);
+      lines.forEach(l => l.parts.sort((a, b) => a.x - b.x));
+      const join = parts => {                      // соседние куски с маленьким зазором — одна ячейка
+        const cells = [];
+        parts.forEach(pt => {
+          const last = cells[cells.length - 1];
+          if (last && pt.x - last.end <= 6) { last.str += (pt.x - last.end > 1 ? ' ' : '') + pt.str; last.end = pt.end; }
+          else cells.push({ x: pt.x, end: pt.end, str: pt.str });
+        });
+        return cells;
+      };
+      const isHeader = cells => {
+        const t = cells.map(c => c.str.toLowerCase());
+        return t.some(s => /этаж|floor/.test(s)) && t.some(s => /стол|desk|рабочее место/.test(s));
+      };
+      const rows = [];
+      let cols = prevCols || null, hi = -1;
+      lines.forEach((l, i) => { if (hi < 0 && isHeader(join(l.parts))) hi = i; });
+      if (hi >= 0) {
+        cols = join(lines[hi].parts).map(c => ({ x: c.x, name: c.str }));
+        // заголовок в две-три строки («НАСТОЛЬНАЯ / ЛАМПА»): слова чуть выше, под той же колонкой
+        for (let j = hi - 1; j >= 0 && lines[j].y - lines[hi].y < 20; j--) {
+          join(lines[j].parts).forEach(c => {
+            const col = cols.find(k => Math.abs(k.x - c.x) <= 8);
+            if (col) col.name = c.str + ' ' + col.name;
+          });
+        }
+      }
+      if (!cols) {                                  // таблицы не нашли — по зазорам, как раньше
+        lines.forEach(l => rows.push(join(l.parts).map(c => c.str)));
+        return { rows, cols: null };
+      }
+      const starts = cols.map(c => c.x);
+      const colOf = center => { let k = 0; starts.forEach((s, i) => { if (s <= center + 4) k = i; }); return k; };
+      if (hi >= 0) rows.push(cols.map(c => c.name));
+      lines.forEach((l, i) => {
+        if (hi >= 0 && i <= hi) return;             // заголовок и всё, что над ним
+        const r = cols.map(() => '');
+        l.parts.forEach(pt => {
+          const k = colOf((pt.x + pt.end) / 2);
+          r[k] = r[k] ? r[k] + ' ' + pt.str : pt.str;
+        });
+        rows.push(r);
+      });
+      return { rows, cols };
     }
 
     function getRows() {
