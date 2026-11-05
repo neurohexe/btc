@@ -155,6 +155,16 @@
       const mode = (useBin || (pdfRows && !pasted) || t === 'auto') ? 'ai' : (modeAi.checked ? 'ai' : 'direct');
       go.disabled = true; matchBox.classList.add('hidden'); previewBox.classList.add('hidden');
       try {
+        // Таблица рабочих мест (login / этаж / № стола / колонки-предметы с «+») — разбираем точно, без ИИ
+        if (!useBin && rows) {
+          setStatus('Смотрю, как устроен файл…');
+          const grid = await api('importDetect', { rows });
+          if (grid) {
+            setStatus('Распознана таблица рабочих мест: каждая «+» — предмет на столе. С логином — в «Выдано», свободные места — в «Мебель по местам».');
+            handleResult(grid);
+            return;
+          }
+        }
         if (mode !== 'ai') {
           setStatus('Сопоставляю колонки…');
           handleResult(await api('importPreview', { target: t, mode, rows }));
@@ -205,6 +215,7 @@
         const sel = el('select', { 'data-name': u.name, 'aria-label': 'Что такое «' + u.name + '» на складе' });
         if (u.suggestion) sel.append(el('option', { value: u.suggestion, text: u.suggestion + ' — предложено ИИ' }));
         sel.append(el('option', { value: '', text: '+ Создать новую позицию «' + u.name + '»' }));
+        sel.append(el('option', { value: '__skip__', text: '— Не загружать эти строки' }));
         const others = res.catalog.filter(n => n !== u.suggestion);
         if (others.length) sel.append(el('optgroup', { label: 'Другие позиции склада' }, ...others.map(n => el('option', { value: n, text: n }))));
         sel.value = u.suggestion || '';
@@ -222,14 +233,20 @@
           const key = 'name' in r.data ? 'name' : 'item';
           const src = r.data[key], to = choice[norm(src)];
           if (!to) return;
+          if (to === '__skip__') { r.skip = true; return; }          // строки не загружаем
           r.data[key] = to;
           r.flags = r.flags.filter(f => f !== 'новая позиция').concat('сопоставлено: ' + src + ' → ' + to);
           r.unknown = false;
           mem[src] = to;
         }));
+        Object.keys(pending.sections).forEach(k => {
+          pending.sections[k] = pending.sections[k].filter(r => !r.skip);
+          if (!pending.sections[k].length) delete pending.sections[k];
+        });
         if (remember.checked && Object.keys(mem).length) api('saveAliases', { map: mem }).catch(e => console.warn(e));
         const r = pending; pending = null;
         matchBox.classList.add('hidden');
+        if (!Object.keys(r.sections).length) { setStatus('Все строки исключены — загружать нечего.', true); return; }
         proceed(r);
       });
       matchBox.replaceChildren(
