@@ -85,6 +85,7 @@
     $('seasonNote').classList.toggle('hidden', !list || season.active !== false || !(meta.items.seasonal || []).length);
     // 1 и 3 квартал: всё, кроме растений, — только в очередь; нужна галочка
     $('queueBox').classList.toggle('hidden', !needQueueAck());
+    $('liftBox').classList.toggle('hidden', !needLiftAck());
     $('newFormatQ').classList.toggle('hidden', picked('reason') !== 'Смена формата работы');
     $('send').disabled = act === 'Заказать' && fmt === 'Удалённый';
     numberSteps();
@@ -95,6 +96,13 @@
     if (!q.active || picked('action') !== 'Заказать') return false;
     const seasonal = new Set((meta.items.seasonal || []).map(s => s.toLowerCase()));
     return [...document.querySelectorAll('input[name="order"]:checked')].some(x => !seasonal.has(x.value.toLowerCase()));
+  }
+
+  // Подъёмный стол — только по справке от врача, согласованной в helpy
+  const isLift = n => /под[ъь]?[её]мн/i.test(n) && /стол/i.test(n);
+  function needLiftAck() {
+    return picked('action') === 'Заказать' &&
+      [...document.querySelectorAll('input[name="order"]:checked')].some(x => isLift(x.value));
   }
 
   $('form').addEventListener('change', update);
@@ -108,11 +116,13 @@
       login: $('login').value.trim(), category: picked('category'), floor: $('floor').value, desk: $('desk').value.trim(),
       action: act, format: picked('format'), items, reason: picked('reason'), newFormat: picked('newFormat'),
       website: document.querySelector('input[name=website]').value,
-      queueAck: $('queueAck').checked
+      queueAck: $('queueAck').checked,
+      liftAck: $('liftAck').checked
     };
     const miss = !req.login ? 'Укажите логин.' : !req.floor ? 'Выберите этаж.' : !req.desk ? 'Укажите номер стола.'
       : !act ? 'Выберите, что хотите сделать.' : act === 'Заказать' && !req.format ? 'Выберите формат работы.'
       : act === 'Сдать' && !req.reason ? 'Выберите причину сдачи.' : !items.length ? 'Отметьте хотя бы одну позицию.'
+      : needLiftAck() && !req.liftAck ? 'Отметьте «Да, у меня есть справка и согласование в helpy».'
       : act === 'Заказать' && needQueueAck() && !req.queueAck ? 'Отметьте «Да, я прочитал(а) и хочу встать в очередь».' : '';
     if (miss) { $('err').textContent = miss; return; }
 
