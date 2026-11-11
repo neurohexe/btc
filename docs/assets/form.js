@@ -39,6 +39,8 @@
     $('queueText').textContent = q.active
       ? 'В данный период можно только сделать заявку на очередь. Выдача начнётся не раньше ' + q.from + '.' : '';
     $('queue').classList.toggle('hidden', !q.active);
+    $('queueAckText').textContent = q.active
+      ? 'Мы принимаем заявки в ' + q.quarter + ' квартале, а закупаем и выдаём со следующего: выдача начнётся не раньше ' + q.from + '.' : '';
     build();
     $('form').classList.remove('hidden');
   }
@@ -77,9 +79,22 @@
       $('orderItems').replaceChildren(...itemChecks(list, 'order'));
       $('orderItems').dataset.fmt = fmt;
     }
+    // Растения вне сезона в список не попадают — предупреждаем, когда их можно заказать
+    const season = meta.season || {};
+    $('seasonText').textContent = season.text || '';
+    $('seasonNote').classList.toggle('hidden', !list || season.active !== false || !(meta.items.seasonal || []).length);
+    // 1 и 3 квартал: всё, кроме растений, — только в очередь; нужна галочка
+    $('queueBox').classList.toggle('hidden', !needQueueAck());
     $('newFormatQ').classList.toggle('hidden', picked('reason') !== 'Смена формата работы');
     $('send').disabled = act === 'Заказать' && fmt === 'Удалённый';
     numberSteps();
+  }
+
+  function needQueueAck() {
+    const q = meta && meta.queue || {};
+    if (!q.active || picked('action') !== 'Заказать') return false;
+    const seasonal = new Set((meta.items.seasonal || []).map(s => s.toLowerCase()));
+    return [...document.querySelectorAll('input[name="order"]:checked')].some(x => !seasonal.has(x.value.toLowerCase()));
   }
 
   $('form').addEventListener('change', update);
@@ -92,11 +107,13 @@
     const req = {
       login: $('login').value.trim(), category: picked('category'), floor: $('floor').value, desk: $('desk').value.trim(),
       action: act, format: picked('format'), items, reason: picked('reason'), newFormat: picked('newFormat'),
-      website: document.querySelector('input[name=website]').value
+      website: document.querySelector('input[name=website]').value,
+      queueAck: $('queueAck').checked
     };
     const miss = !req.login ? 'Укажите логин.' : !req.floor ? 'Выберите этаж.' : !req.desk ? 'Укажите номер стола.'
       : !act ? 'Выберите, что хотите сделать.' : act === 'Заказать' && !req.format ? 'Выберите формат работы.'
-      : act === 'Сдать' && !req.reason ? 'Выберите причину сдачи.' : !items.length ? 'Отметьте хотя бы одну позицию.' : '';
+      : act === 'Сдать' && !req.reason ? 'Выберите причину сдачи.' : !items.length ? 'Отметьте хотя бы одну позицию.'
+      : act === 'Заказать' && needQueueAck() && !req.queueAck ? 'Отметьте «Да, я прочитал(а) и хочу встать в очередь».' : '';
     if (miss) { $('err').textContent = miss; return; }
 
     $('send').disabled = true; $('send').textContent = 'Отправляю…';
