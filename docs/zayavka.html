@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/style.css?v=20261111a">
+<link rel="stylesheet" href="assets/style.css?v=20261111b">
 <style>
   .wrap { max-width: 680px; margin: 0 auto; padding: 28px 16px 64px; }
   header.top { margin-bottom: 22px; }
@@ -124,6 +124,11 @@
             <div class="help">Каждая позиция — 1 шт. на сотрудника.</div>
             <div class="checks" id="orderItems"></div>
           </div>
+          <div id="liftBox" class="note warn queue-ack hidden" role="note">
+            <b>Подъёмный стол — только по справке</b>
+            <span>Он ставится вместо обычного стола и выдаётся только при наличии справки от врача, согласованной через портал helpy.</span>
+            <label class="check"><input type="checkbox" id="liftAck"><span>Да, у меня есть справка и согласование в helpy</span></label>
+          </div>
           <div id="seasonNote" class="note warn hidden" role="note">🌱 Заявки на растения принимаются только <span id="seasonText"></span>.</div>
           <div id="queueBox" class="note warn queue-ack hidden" role="note">
             <b>Сейчас идёт сбор заявок в очередь</b>
@@ -164,8 +169,8 @@
   </div>
 </div>
 
-<script src="offices.js?v=20261111a"></script>
-<script src="assets/api.js?v=20261111a"></script>
-<script src="assets/form.js?v=20261111a"></script>
+<script src="offices.js?v=20261111b"></script>
+<script src="assets/api.js?v=20261111b"></script>
+<script src="assets/form.js?v=20261111b"></script>
 </body>
 </html>
