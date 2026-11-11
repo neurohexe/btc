@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/style.css?v=20261105c">
+<link rel="stylesheet" href="assets/style.css?v=20261111a">
 <style>
   .wrap { max-width: 680px; margin: 0 auto; padding: 28px 16px 64px; }
   header.top { margin-bottom: 22px; }
@@ -34,6 +34,8 @@
   .err { color: var(--bad); font-size: 14px; }
   .queue { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 14px; border-left: 4px solid var(--tag); }
   .queue b { display: block; margin-bottom: 2px; }
+  .queue-ack { display: flex; flex-direction: column; gap: 10px; border-left: 4px solid var(--tag); }
+  .queue-ack .check { background: var(--panel); }
 
   /* Готово: номер заявки на бирке — главный момент страницы */
   .done { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 28px 22px; }
@@ -122,6 +124,12 @@
             <div class="help">Каждая позиция — 1 шт. на сотрудника.</div>
             <div class="checks" id="orderItems"></div>
           </div>
+          <div id="seasonNote" class="note warn hidden" role="note">🌱 Заявки на растения принимаются только <span id="seasonText"></span>.</div>
+          <div id="queueBox" class="note warn queue-ack hidden" role="note">
+            <b>Сейчас идёт сбор заявок в очередь</b>
+            <span id="queueAckText"></span>
+            <label class="check"><input type="checkbox" id="queueAck"><span>Да, я прочитал(а) и хочу встать в очередь</span></label>
+          </div>
         </div>
 
         <div id="returnBox" class="hidden" style="display:flex;flex-direction:column;gap:14px">
@@ -156,8 +164,8 @@
   </div>
 </div>
 
-<script src="offices.js?v=20261105c"></script>
-<script src="assets/api.js?v=20261105c"></script>
-<script src="assets/form.js?v=20261105c"></script>
+<script src="offices.js?v=20261111a"></script>
+<script src="assets/api.js?v=20261111a"></script>
+<script src="assets/form.js?v=20261111a"></script>
 </body>
 </html>
