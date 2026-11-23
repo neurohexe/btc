@@ -702,25 +702,59 @@
 
     // Перемещение между местами — без возврата на склад
     const placeName = r => 'Этаж ' + r['Этаж'] + (r['Помещение / зона'] ? ' · ' + r['Помещение / зона'] : '');
-    const openMove = pre => {
-      const opts = rows.map((r, i) => ({ value: String(i), text: r['Позиция'] + ' — ' + placeName(r) + ' (' + r['Количество'] + ' шт.)' }))
-        .sort((a, b) => a.text.localeCompare(b.text, 'ru'));
+    // Окно по шагам: категория → этаж → место → позиция (вместо одного длинного списка)
+    const openMove = async pre => {
+      const c = catalogCache || await loadCatalog().catch(() => null);
+      const catOf = {};
+      ((c && c.items) || []).forEach(i => { catOf[norm(i.name)] = i.category || NO_CAT; });
+      const cat = r => catOf[norm(r['Позиция'])] || NO_CAT;
+      const nat = (a, b) => String(a).localeCompare(String(b), 'ru', { numeric: true });
+      const uniq = a => [...new Set(a)].sort(nat);
+      const preRow = pre != null ? rows[pre] : null;
+      const cats = uniq(rows.map(cat));
       formDialog({
         title: 'Переместить', submit: 'Перенести',
         fields: [
-          { key: 'src', label: 'Что и откуда', type: 'select', value: pre != null ? String(pre) : opts[0].value, options: opts },
+          { key: 'cat', label: '1. Категория', type: 'select', options: cats },
+          { key: 'floor', label: '2. С какого этажа', type: 'select', options: [] },
+          { key: 'place', label: '3. Откуда (место / зона)', type: 'select', options: [] },
+          { key: 'src', label: '4. Что переносим', type: 'select', options: [] },
           { key: 'qty', label: 'Сколько, шт.', type: 'number', value: 1 },
           { key: 'toFloor', label: 'Куда: этаж', type: 'select', options: floorList.map(String) },
           { key: 'toRoom', label: 'Куда: помещение / зона', placeholder: 'например, Холл (можно оставить пустым)' },
           { key: 'comment', label: 'Комментарий (необязательно)' }
         ],
         onSubmit: async v => {
+          if (v.src === '') throw new Error('Выберите, что переносите.');
           const r = rows[Number(v.src)];
           const res = await api('moveFurniture', { floor: r['Этаж'], room: r['Помещение / зона'], item: r['Позиция'],
             qty: v.qty, toFloor: v.toFloor, toRoom: v.toRoom, comment: v.comment });
           toast(res.message); route();
         }
       });
+      const sel = k => formDlg.querySelector('[data-key="' + k + '"] select');
+      const fill = (k, opts, want) => {
+        const x = sel(k);
+        x.replaceChildren(...(opts.length ? opts : [{ value: '', text: '—' }]).map(o => el('option', { value: o.value, text: o.text })));
+        if (want != null && opts.some(o => o.value === want)) x.value = want;
+      };
+      const placeOf = r => r['Помещение / зона'] || 'Без зоны';
+      const refill = (from, want) => {
+        want = want || {};
+        const inCat = rows.filter(r => cat(r) === sel('cat').value);
+        if (from <= 1) fill('floor', uniq(inCat.map(r => String(r['Этаж']))).map(f => ({ value: f, text: 'Этаж ' + f })), want.floor);
+        const onFloor = inCat.filter(r => String(r['Этаж']) === sel('floor').value);
+        if (from <= 2) fill('place', uniq(onFloor.map(placeOf)).map(p => ({ value: p, text: p })), want.place);
+        const here = onFloor.filter(r => placeOf(r) === sel('place').value);
+        fill('src', here.map(r => ({ value: String(rows.indexOf(r)), text: r['Позиция'] + ' — ' + r['Количество'] + ' шт.' })), want.src);
+        sel('toFloor').value = sel('toFloor').value || sel('floor').value;
+      };
+      sel('cat').addEventListener('change', () => refill(1));
+      sel('floor').addEventListener('change', () => refill(2));
+      sel('place').addEventListener('change', () => refill(3));
+      if (preRow) sel('cat').value = cat(preRow);
+      refill(1, preRow ? { floor: String(preRow['Этаж']), place: placeOf(preRow), src: String(pre) } : {});
+      if (preRow) sel('toFloor').value = String(preRow['Этаж']);
     };
     const moveBtn = el('button', { class: 'btn ghost', type: 'button', text: 'Переместить' });
     moveBtn.addEventListener('click', () => openMove());
