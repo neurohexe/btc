@@ -699,6 +699,33 @@
         el('td', { class: 'n' }, el('span', { class: 'tag', text: String(totals[n].all) })))))));
 
     const floors = Object.keys(byFloor).sort((x, y) => Number(x) - Number(y));
+
+    // Перемещение между местами — без возврата на склад
+    const placeName = r => 'Этаж ' + r['Этаж'] + (r['Помещение / зона'] ? ' · ' + r['Помещение / зона'] : '');
+    const openMove = pre => {
+      const opts = rows.map((r, i) => ({ value: String(i), text: r['Позиция'] + ' — ' + placeName(r) + ' (' + r['Количество'] + ' шт.)' }))
+        .sort((a, b) => a.text.localeCompare(b.text, 'ru'));
+      formDialog({
+        title: 'Переместить', submit: 'Перенести',
+        fields: [
+          { key: 'src', label: 'Что и откуда', type: 'select', value: pre != null ? String(pre) : opts[0].value, options: opts },
+          { key: 'qty', label: 'Сколько, шт.', type: 'number', value: 1 },
+          { key: 'toFloor', label: 'Куда: этаж', type: 'select', options: floorList.map(String) },
+          { key: 'toRoom', label: 'Куда: помещение / зона', placeholder: 'например, Холл (можно оставить пустым)' },
+          { key: 'comment', label: 'Комментарий (необязательно)' }
+        ],
+        onSubmit: async v => {
+          const r = rows[Number(v.src)];
+          const res = await api('moveFurniture', { floor: r['Этаж'], room: r['Помещение / зона'], item: r['Позиция'],
+            qty: v.qty, toFloor: v.toFloor, toRoom: v.toRoom, comment: v.comment });
+          toast(res.message); route();
+        }
+      });
+    };
+    const moveBtn = el('button', { class: 'btn ghost', type: 'button', text: 'Переместить' });
+    moveBtn.addEventListener('click', () => openMove());
+    if (!rows.length) moveBtn.classList.add('hidden');
+
     const clearBtn = el('button', { class: 'btn danger', type: 'button', text: 'Очистить…' });
     clearBtn.addEventListener('click', () => formDialog({
       title: 'Очистить «Мебель по местам»', submit: 'Удалить строки',
@@ -713,16 +740,17 @@
       }
     }));
     main.replaceChildren(
-      head('Мебель по местам', 'Что стоит на этажах и в общих зонах офиса и ни за кем не числится.', clearBtn, opBtn),
+      head('Мебель по местам', 'Что стоит на этажах и в общих зонах офиса и ни за кем не числится.', clearBtn, moveBtn, opBtn),
       rows.length ? el('div', {},
         el('h2', { style: 'margin-bottom:10px', text: 'По офису' }), summary,
         el('h2', { style: 'margin-bottom:10px', text: 'По зонам' }),
         el('div', { class: 'table-wrap' }, el('table', {},
-          el('thead', {}, el('tr', {}, el('th', { text: 'Помещение / зона' }), el('th', { text: 'Позиция' }), el('th', { class: 'n', text: 'Кол-во' }), el('th', { text: 'Комментарий' }))),
+          el('thead', {}, el('tr', {}, el('th', { text: 'Помещение / зона' }), el('th', { text: 'Позиция' }), el('th', { class: 'n', text: 'Кол-во' }), el('th', { text: 'Комментарий' }), el('th', {}))),
           el('tbody', {}, ...floors.flatMap(f => [
-            el('tr', { class: 'floor-head' }, el('td', { colspan: 4, text: 'Этаж ' + f })),
+            el('tr', { class: 'floor-head' }, el('td', { colspan: 5, text: 'Этаж ' + f })),
             ...byFloor[f].map(r => el('tr', {}, el('td', { text: r['Помещение / зона'] || '—' }), el('td', {}, el('b', { text: r['Позиция'] })),
-              el('td', { class: 'n', text: String(r['Количество']) }), el('td', { class: 'muted', text: r['Комментарий'] })))
+              el('td', { class: 'n', text: String(r['Количество']) }), el('td', { class: 'muted', text: r['Комментарий'] }),
+              el('td', {}, el('button', { class: 'link', type: 'button', text: 'Переместить', onclick: () => openMove(rows.indexOf(r)) }))))
           ])))))
         : empty('Пока ничего не расставлено. Нажмите «Расставить по этажам».'));
   }
@@ -734,6 +762,7 @@
     if (/^(Выдача|Установка|Выдано ранее)/.test(op)) return 'out';
     if (/^Возврат/.test(op)) return 'ret';
     if (/^Списание/.test(op)) return 'off';
+    if (/^Перемещение/.test(op)) return 'ret';
     return '';
   }
 
