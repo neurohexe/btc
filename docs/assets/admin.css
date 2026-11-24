@@ -204,3 +204,7 @@ table.floors td:nth-child(2) { width: 110px; }
 table.floors input { width: 100%; }
 table.matrix td.n, table.matrix th.n { width: 72px; }
 table.matrix td:first-child { min-width: 180px; }
+
+/* Нужно закупить по заявкам — на всю ширину под сводкой */
+.demand { margin-top: 28px; }
+.demand h2 { margin-bottom: 8px; }

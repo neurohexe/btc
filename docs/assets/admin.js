@@ -133,8 +133,36 @@
                 el('thead', {}, el('tr', {}, el('th', { text: 'Позиция' }), el('th', { class: 'n', text: 'Доступно' }), el('th', { class: 'n', text: 'Минимум' }))),
                 el('tbody', {}, ...d.toBuy.map(i => el('tr', {}, el('td', { text: i.name }),
                   el('td', { class: 'n' }, el('span', { class: 'tag low', text: String(i.available) })), el('td', { class: 'n', text: String(i.min) }))))))
-            : empty('Всего хватает')))
+            : empty('Всего хватает'))),
+      demandBox
     );
+    loadDemand();
+  }
+
+  // Нужно закупить по заявкам: открытые заявки (новые + в работе) против остатка склада
+  const demandBox = el('section', { class: 'demand' });
+  async function loadDemand() {
+    demandBox.replaceChildren(el('h2', { text: 'Нужно закупить по заявкам' }), el('p', { class: 'muted small', text: 'Считаю…' }));
+    let d;
+    try { d = await api('demand'); }
+    catch (e) { demandBox.replaceChildren(); return; }               // Demand.gs ещё не добавлен — блок просто не показываем
+    const sub = 'Сколько просят в открытых заявках (новые и в работе, включая тикеты) минус остаток на складе' +
+      ' плюс минимальный остаток, если он задан.' + (d.queue ? ' ' + d.queue : '');
+    demandBox.replaceChildren(
+      el('h2', { text: 'Нужно закупить по заявкам' + (d.total ? ' — ' + d.total + ' шт.' : '') }),
+      el('p', { class: 'muted small', style: 'margin:-4px 0 10px', text: sub }),
+      d.items.length
+        ? el('div', { class: 'table-wrap' }, el('table', {},
+            el('thead', {}, el('tr', {}, el('th', { text: 'Позиция' }), el('th', { class: 'n', text: 'В заявках' }),
+              el('th', { class: 'n', text: 'На складе' }), el('th', { class: 'n', text: 'Мин.' }), el('th', { class: 'n', text: 'Докупить' }))),
+            el('tbody', {}, ...d.items.map(i => el('tr', {},
+              el('td', {}, el('b', { text: i.name }), i.unknown ? el('span', { class: 'muted small', text: ' · нет в каталоге' }) : null,
+                i.category ? el('div', { class: 'muted small', text: i.category }) : null),
+              el('td', { class: 'n', title: 'новые: ' + i.fresh + ', в работе: ' + i.work, text: String(i.requests) }),
+              el('td', { class: 'n', text: String(i.inStock) }),
+              el('td', { class: 'n muted', text: i.min ? String(i.min) : '—' }),
+              el('td', { class: 'n' }, el('span', { class: 'tag low', text: String(i.need) })))))))
+        : empty('По открытым заявкам всего хватает'));
   }
 
   // ---------- Заявки ----------
