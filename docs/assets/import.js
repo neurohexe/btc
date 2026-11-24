@@ -13,6 +13,7 @@
     const target = el('select', { 'aria-label': 'Что загружаем' });
     if (meta.aiReady) target.append(el('option', { value: 'auto', text: 'Всё сразу — ИИ сам разложит' }));
     Object.keys(meta.targets).forEach(k => target.append(el('option', { value: k, text: meta.targets[k].title })));
+    target.append(el('option', { value: 'reconcile', text: 'Сверка: кто что числит (обновить «Выдано» по инвентаризации)' }));
     const modeDirect = el('input', { type: 'radio', name: 'impMode', value: 'direct', checked: true });
     const modeAi = el('input', { type: 'radio', name: 'impMode', value: 'ai', disabled: !meta.aiReady });
     const hint = el('p', { class: 'muted small' });
@@ -47,7 +48,12 @@
 
     function updateHint() {
       const v = target.value;
-      if (v === 'auto') {
+      if (v === 'reconcile') {
+        hint.textContent = 'Файл инвентаризации (PDF или Excel: сетка столов или список «логин — позиция») сравнится с «Выдано». ' +
+          'Покажу, что добавить, что снять и у кого сменился стол — ничего не запишется, пока не подтвердите. ' +
+          'Сверяются только этажи и сотрудники из файла.';
+        modeDirect.checked = true; modeDirect.disabled = false;
+      } else if (v === 'auto') {
         hint.textContent = 'ИИ перенесёт все строки и сам разложит их: склад, выдано сотрудникам, мебель по местам.';
         modeAi.checked = true; modeDirect.disabled = true;
       } else {
@@ -71,7 +77,8 @@
       const reader = new FileReader();
       const aiOnly = AI_TYPES.indexOf(f.type) >= 0 || /\.(pdf|png|jpe?g|webp)$/i.test(f.name);
       if (aiOnly) {
-        if (!meta.aiReady) { setStatus('PDF и фото разбирает только ИИ, а он не настроен (в таблице: Настройки → Настройки ИИ).', true); return; }
+        const pdfFile = /\.pdf$/i.test(f.name) || f.type === 'application/pdf';
+        if (!meta.aiReady && !(pdfFile && target.value === 'reconcile')) { setStatus('PDF и фото разбирает только ИИ, а он не настроен (в таблице: Настройки → Настройки ИИ).', true); return; }
         if (f.size > 15 * 1024 * 1024) { setStatus('Файл больше 15 МБ — разбейте его на части.', true); return; }
         reader.onload = async e => {
           const url = String(e.target.result);
@@ -193,6 +200,18 @@
       const rows = useBin ? null : (pdfRows && !pasted ? pdfRows : getRows());
       if (!useBin && !rows) { setStatus('Выберите файл или вставьте строки.', true); return; }
       const t = target.value;
+      if (t === 'reconcile') {
+        if (!rows) { setStatus('Для сверки нужен PDF с текстом или Excel — скан/фото не подойдёт.', true); return; }
+        go.disabled = true; matchBox.classList.add('hidden');
+        try {
+          setStatus('Сравниваю файл с «Выдано»…');
+          const res = await api('reconcilePreview', { rows });
+          setStatus('');
+          window.TMCReconcile.render(previewBox, res, { api, toast });
+        } catch (e) { setStatus(e.message, true); }
+        finally { go.disabled = false; }
+        return;
+      }
       const mode = (useBin || (pdfRows && !pasted) || t === 'auto') ? 'ai' : (modeAi.checked ? 'ai' : 'direct');
       go.disabled = true; matchBox.classList.add('hidden'); previewBox.classList.add('hidden');
       try {
