@@ -150,6 +150,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); outline
 .status { display: inline-block; padding: 1px 9px; border-radius: 4px; font-size: 13px; font-weight: 500; white-space: nowrap; }
 .status.new { background: var(--warn-soft); color: var(--warn); }
 .status.work { background: var(--accent-soft); color: var(--accent); }
+.status.queue { background: #efe7fb; color: #5b3f8a; }
 .status.done { background: var(--ok-soft); color: var(--ok); }
 .status.off { background: #eceff1; color: var(--muted); }
 

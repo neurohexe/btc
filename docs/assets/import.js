@@ -8,11 +8,13 @@
     const { api, toast, head } = ctx;
     const meta = await api('importMeta');
     let wb = null, bin = null, pdfRows = null, pending = null;
+    let reconcileMode = false;
 
     // ---------- Разметка ----------
     const target = el('select', { 'aria-label': 'Что загружаем' });
     if (meta.aiReady) target.append(el('option', { value: 'auto', text: 'Всё сразу — ИИ сам разложит' }));
     Object.keys(meta.targets).forEach(k => target.append(el('option', { value: k, text: meta.targets[k].title })));
+    target.append(el('option', { value: 'reconcile', text: 'Сверка: кто что числит (обновить «Выдано» по инвентаризации)' }));
     const modeDirect = el('input', { type: 'radio', name: 'impMode', value: 'direct', checked: true });
     const modeAi = el('input', { type: 'radio', name: 'impMode', value: 'ai', disabled: !meta.aiReady });
     const hint = el('p', { class: 'muted small' });
@@ -47,7 +49,13 @@
 
     function updateHint() {
       const v = target.value;
-      if (v === 'auto') {
+      if (v === 'reconcile') {
+        hint.textContent = 'Файл инвентаризации (PDF или Excel: сетка столов или список «логин — позиция») сравнится с «Выдано». ' +
+          'Покажу, что добавить, что снять и у кого сменился стол — ничего не запишется, пока не подтвердите. ' +
+          'Сверяются только этажи и сотрудники из файла.';
+        modeDirect.checked = true; modeDirect.disabled = false;
+        if (meta.aiReady) hint.textContent += ' Если файл устроен по-другому, его разберёт ИИ; незнакомые названия система уточнит.';
+      } else if (v === 'auto') {
         hint.textContent = 'ИИ перенесёт все строки и сам разложит их: склад, выдано сотрудникам, мебель по местам.';
         modeAi.checked = true; modeDirect.disabled = true;
       } else {
@@ -71,7 +79,8 @@
       const reader = new FileReader();
       const aiOnly = AI_TYPES.indexOf(f.type) >= 0 || /\.(pdf|png|jpe?g|webp)$/i.test(f.name);
       if (aiOnly) {
-        if (!meta.aiReady) { setStatus('PDF и фото разбирает только ИИ, а он не настроен (в таблице: Настройки → Настройки ИИ).', true); return; }
+        const pdfFile = /\.pdf$/i.test(f.name) || f.type === 'application/pdf';
+        if (!meta.aiReady && !(pdfFile && target.value === 'reconcile')) { setStatus('PDF и фото разбирает только ИИ, а он не настроен (в таблице: Настройки → Настройки ИИ).', true); return; }
         if (f.size > 15 * 1024 * 1024) { setStatus('Файл больше 15 МБ — разбейте его на части.', true); return; }
         reader.onload = async e => {
           const url = String(e.target.result);
@@ -192,7 +201,9 @@
       const useBin = bin && !pasted && !pdfRows;
       const rows = useBin ? null : (pdfRows && !pasted ? pdfRows : getRows());
       if (!useBin && !rows) { setStatus('Выберите файл или вставьте строки.', true); return; }
-      const t = target.value;
+      let t = target.value;
+      reconcileMode = t === 'reconcile';                 // сверка идёт тем же путём, что загрузка в «Выдано»
+      if (reconcileMode) t = 'issued';
       const mode = (useBin || (pdfRows && !pasted) || t === 'auto') ? 'ai' : (modeAi.checked ? 'ai' : 'direct');
       go.disabled = true; matchBox.classList.add('hidden'); previewBox.classList.add('hidden');
       try {
@@ -208,8 +219,13 @@
         }
         if (mode !== 'ai') {
           setStatus('Сопоставляю колонки…');
-          handleResult(await api('importPreview', { target: t, mode, rows }));
-          return;
+          try {
+            handleResult(await api('importPreview', { target: t, mode, rows }));
+            return;
+          } catch (e) {
+            if (!(reconcileMode && meta.aiReady)) throw e;
+            setStatus('Колонки не распознаны по заголовкам — файл разберёт ИИ…');
+          }
         }
         const parts = [];
         if (useBin) {
@@ -303,6 +319,7 @@
 
     // ---------- Проверка и запись ----------
     function proceed(res) {
+      if (reconcileMode) { reconcile(res); return; }
       if (!direct.checked) { renderPreview(res.sections); return; }
       const jobs = [], rest = {};
       Object.keys(res.sections).forEach(k => {
@@ -312,6 +329,18 @@
         if (bad.length) rest[k] = bad;
       });
       commit(jobs, () => { if (Object.keys(rest).length) renderPreview(rest, true); });
+    }
+
+    // Сверка «Выдано»: строки уже разобраны (сетка / колонки / ИИ) и названия уточнены — сравниваем с тем, что числится
+    async function reconcile(res) {
+      const records = ((res.sections || {}).issued || []).filter(r => r.ok).map(r => r.data);
+      if (!records.length) { setStatus('В файле не нашлось строк «сотрудник — позиция».', true); return; }
+      try {
+        setStatus('Сравниваю файл с «Выдано»…');
+        const out = await api('reconcilePreview', { records });
+        setStatus('');
+        window.TMCReconcile.render(previewBox, out, { api, toast });
+      } catch (e) { setStatus(e.message, true); }
     }
 
     function renderPreview(sections, leftovers) {

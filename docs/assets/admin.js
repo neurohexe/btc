@@ -5,6 +5,7 @@
   const SESSION_KEY = 'tmc_session';
   let session = store.get(SESSION_KEY);
   let meta = null, catalogCache = null;
+  let metaReady = Promise.resolve();   // справочники (этажи, квартал очереди) — карточкам заявок нужны до отрисовки
 
   // ---------- Связь ----------
 
@@ -76,8 +77,8 @@
     $('barOffice').textContent = session.office || (o && o.name) || '';
     $('barUser').textContent = session.name;
     $('switchOffice').classList.toggle('hidden', offices.length < 2);
+    metaReady = api('meta').then(m => { meta = m; }).catch(() => { /* покажется в разделе */ });
     route();
-    try { meta = await api('meta'); } catch (e) { /* покажется в разделе */ }
   }
 
   // ---------- Разделы ----------
@@ -114,13 +115,14 @@
   // ---------- Сводка ----------
 
   async function overview(main) {
-    const d = await api('overview');
+    const [d] = await Promise.all([api('overview'), metaReady]);
     setOpenCount(d.open.length);
     const fig = (n, label, alert) => el('div', { class: 'figure' + (alert && n ? ' alert' : '') }, el('b', { text: String(n) }), el('span', { text: label }));
     main.replaceChildren(
       head('Сводка', d.office),
       el('div', { class: 'figures' },
-        fig(d.counts.new, 'новых ' + plural(d.counts.new, 'заявка', 'заявки', 'заявок')),
+        fig(d.counts.new, plural(d.counts.new, 'новая заявка', 'новые заявки', 'новых заявок')),
+        fig(d.counts.queue || 0, 'в очереди'),
         fig(d.counts.work, 'в работе'),
         fig(d.counts.inStock, 'шт. на складе'),
         fig(d.counts.toBuy, 'пора докупить', true)),
@@ -167,7 +169,7 @@
 
   // ---------- Заявки ----------
 
-  const STATUS_CLASS = { 'Новая': 'new', 'В работе': 'work', 'Выдана': 'done', 'Принята на склад': 'done', 'Отклонена': 'off' };
+  const STATUS_CLASS = { 'Новая': 'new', 'В очереди': 'queue', 'В работе': 'work', 'Выдана': 'done', 'Принята на склад': 'done', 'Отклонена': 'off' };
 
   function reqCard(r) {
     const cls = STATUS_CLASS[r.status] || 'off';
@@ -189,11 +191,17 @@
       r.by ? el('div', { class: 'req-meta', text: 'Ответственный: ' + r.by + (r.rejectReason ? '. Причина отклонения: ' + r.rejectReason : '') }) : null
     ].filter(Boolean));
     const actions = el('div', { class: 'req-actions' });
-    const doAct = async (act, btn, reason) => {
+    const doAct = async (act, btn, reason, force) => {
       actions.querySelectorAll('button,select').forEach(b => b.disabled = true);
       btn.textContent = 'Выполняю…';
       try {
-        const res = await api('requestAction', { id: r.id, act, reason });
+        const res = await api('requestAction', { id: r.id, act, reason, force: !!force });
+        // квартал сбора заявок: выдачу нужно подтвердить
+        if (res.confirm) {
+          if (confirm(res.message)) return doAct(act, btn, reason, true);
+          card.replaceWith(reqCard(r));
+          return;
+        }
         toast(res.message);
         if (res.request) card.replaceWith(reqCard(res.request));
         refreshCount();
@@ -210,8 +218,17 @@
       actions.replaceChildren(sel, go, el('button', { class: 'link', type: 'button', text: 'Отмена', onclick: () => card.replaceWith(reqCard(r)) }));
     };
     const btn = (text, cls2, fn) => { const b = el('button', { class: 'btn small ' + cls2, type: 'button', text }); b.addEventListener('click', () => fn(b)); return b; };
-    if (r.status === 'Новая') {
+    const q = (meta && meta.queue) || {};
+    if (r.status === 'Новая' && r.action !== 'Сдать' && q.active) {
+      // 1 и 3 квартал: заявку на выдачу ставим в очередь, срочную можно взять сразу
+      actions.append(btn('В очередь', '', b => doAct('queue', b)), btn('Взять сейчас, вне очереди', 'ghost', b => doAct('take', b)),
+        btn('Отклонить', 'danger', showReject));
+    } else if (r.status === 'Новая') {
       actions.append(btn('Взять в работу', '', b => doAct('take', b)), btn('Отклонить', 'danger', showReject));
+    } else if (r.status === 'В очереди') {
+      actions.append(btn(q.active ? 'Взять вне очереди' : 'Взять в работу', q.active ? 'ghost' : '', b => doAct('take', b)),
+        btn('Отклонить', 'danger', showReject));
+      if (q.active) actions.append(el('span', { class: 'muted small', text: 'Выдача с ' + q.from + ' — бот напомнит' }));
     } else if (r.status === 'В работе') {
       actions.append(r.action === 'Сдать'
         ? btn('Принято на склад', '', b => doAct('accept', b))
@@ -226,6 +243,7 @@
   }
 
   async function requests(main) {
+    await metaReady;
     const scope = el('select', { 'aria-label': 'Какие заявки' },
       el('option', { value: 'open', text: 'Открытые' }), el('option', { value: 'all', text: 'Все (последние 300)' }));
     const q = el('input', { type: 'search', placeholder: 'Поиск: логин, №, позиция, стол' });
