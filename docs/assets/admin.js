@@ -174,7 +174,7 @@
   function reqCard(r) {
     const cls = STATUS_CLASS[r.status] || 'off';
     const card = el('article', { class: 'req ' + cls });
-    const where = ['этаж ' + r.floor, r.desk ? 'стол ' + r.desk : ''].filter(Boolean).join(', ');
+    const where = ['этаж ' + r.floor, r.room ? 'кабинет ' + r.room : '', r.desk ? 'стол ' + r.desk : ''].filter(Boolean).join(', ');
     const what = r.action === 'Сдать'
       ? 'Сдаёт' + (r.reason ? ': ' + String(r.reason).toLowerCase() : '') + (r.newFormat ? ' → ' + r.newFormat : '')
       : 'Заказ' + (r.format ? ', ' + String(r.format).toLowerCase() + ' формат' : '');
@@ -678,9 +678,9 @@
         const rows = await api('issued', { q: q.value, active: all.value === 'active' });
         box.replaceChildren(rows.length
           ? el('div', { class: 'table-wrap' }, el('table', {},
-              el('thead', {}, el('tr', {}, ...['Логин', 'Этаж', 'Стол', 'Позиция', 'Формат', 'Выдано', '№ заявки', 'Статус', ''].map(h => el('th', { text: h })))),
+              el('thead', {}, el('tr', {}, ...['Логин', 'Этаж', 'Кабинет', 'Стол', 'Позиция', 'Формат', 'Выдано', '№ заявки', 'Статус', ''].map(h => el('th', { text: h })))),
               el('tbody', {}, ...rows.map(r => el('tr', {},
-                el('td', { text: r['Логин'] || '—' }), el('td', { text: r['Этаж'] }), el('td', { text: r['Стол'] }),
+                el('td', { text: r['Логин'] || '—' }), el('td', { text: r['Этаж'] }), el('td', { text: r['Кабинет'] || '' }), el('td', { text: r['Стол'] }),
                 el('td', {}, el('b', { text: r['Позиция'] })), el('td', { text: r['Формат работы'] }),
                 el('td', { text: fmtDate(r['Дата выдачи']) }), el('td', { text: r['№ заявки'] }),
                 el('td', {}, el('span', { class: 'status ' + (r['Статус'] === 'Числится' ? 'done' : 'off'), text: r['Статус'] + (r['Дата сдачи'] ? ' ' + fmtDate(r['Дата сдачи']) : '') })),
@@ -693,7 +693,7 @@
     all.addEventListener('change', load);
 
     async function delIssued(r) {
-      const who = (r['Логин'] && r['Логин'] !== '-' ? r['Логин'] : 'стол ' + r['Стол']);
+      const who = (r['Логин'] && r['Логин'] !== '-' ? r['Логин'] : r['Кабинет'] ? 'кабинет ' + r['Кабинет'] : 'стол ' + r['Стол']);
       if (!confirm('Удалить запись «' + r['Позиция'] + '» — ' + who + '?\n\nСклад не изменится. Если вещь вернули — лучше оформить заявку «Сдать».')) return;
       try { const res = await api('deleteIssued', { row: r._row }); toast(res.message); load(); }
       catch (e) { toast(e.message, true); }
@@ -869,7 +869,7 @@
             el('td', {}, el('b', { text: r['Позиция'] })),
             el('td', { class: 'n', text: r['Кол-во'] + ' шт.' }),
             el('td', { class: 'muted', text: [r['Откуда'], r['Куда']].filter(Boolean).join(' → ') }),
-            el('td', { text: [r['Логин'], r['Этаж'] ? 'этаж ' + r['Этаж'] : '', r['Стол'] ? 'стол ' + r['Стол'] : ''].filter(Boolean).join(', ') }),
+            el('td', { text: [r['Логин'], r['Этаж'] ? 'этаж ' + r['Этаж'] : '', r['Стол'] ? (/^каб\./i.test(r['Стол']) ? r['Стол'] : 'стол ' + r['Стол']) : ''].filter(Boolean).join(', ') }),
             el('td', { text: r['№ заявки'] }),
             el('td', { class: 'muted small', text: [r['Кто провёл'], r['Комментарий']].filter(Boolean).join('. ') }))))))))
           : [empty('Ничего не найдено. Измените поиск или период.')]));
